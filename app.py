@@ -5,8 +5,29 @@ from datetime import date, timedelta
 from supabase import create_client, Client
 import io
 
-# --- 1. CONFIGURACIÓN Y CONEXIÓN ---
+# --- 1. CONFIGURACIÓN INICIAL ---
 st.set_page_config(page_title="Agrícola Montserrat 2026", layout="wide", page_icon="🍌")
+
+# --- 🔒 BLOQUE DE SEGURIDAD (NUEVO) ---
+# Esto verifica si la contraseña es correcta antes de cargar nada más
+def check_password():
+    """Valida la contraseña comparándola con los Secrets"""
+    if st.session_state["password_input"] == st.secrets["APP_PASSWORD"]:
+        st.session_state["password_correct"] = True
+        del st.session_state["password_input"]  # Borramos la clave de memoria
+    else:
+        st.error("😕 Clave incorrecta, intenta de nuevo.")
+
+if "password_correct" not in st.session_state:
+    st.session_state["password_correct"] = False
+
+if not st.session_state["password_correct"]:
+    st.title("🔐 Acceso Restringido")
+    st.text_input("Ingresa la clave maestra:", type="password", key="password_input", on_change=check_password)
+    st.info("Sistema de Gestión Agrícola Montserrat")
+    st.stop()  # 🛑 AQUÍ SE DETIENE TODO SI NO HAY CLAVE
+
+# --- 🔓 SI PASA LA CLAVE, EL CÓDIGO CONTINÚA AQUÍ ABAJO ---
 
 # Manejo robusto de errores de conexión
 try:
@@ -32,7 +53,7 @@ def cargar_datos():
     if not supabase: return pd.DataFrame()
     
     try:
-        # Intentamos traer los datos. Si la tabla no existe o hay error, salta al except
+        # Intentamos traer los datos
         response = supabase.table("ventas_2026").select("*").execute()
         df = pd.DataFrame(response.data)
         
@@ -54,7 +75,6 @@ def cargar_datos():
             return df
             
     except Exception as e:
-        # Si falla, mostramos el error pero no rompemos la app
         st.warning(f"Esperando datos... (Detalle: {e})")
     
     # Estructura vacía por defecto
@@ -76,7 +96,7 @@ def subir_archivo(archivo, nombre_base):
             )
             return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
         except Exception as e:
-            st.warning(f"Nota: No se pudo subir imagen al bucket (¿Existe el bucket 'facturas'?). {e}")
+            # st.warning(f"Nota: No se pudo subir imagen (¿Bucket creado?). {e}")
             return ""
     return ""
 
@@ -95,6 +115,7 @@ def color_deuda(row):
 
 # --- INICIO DE LA APP ---
 st.title("🌱 Agrícola Montserrat - Gestión Global")
+st.write(f"Bienvenido. Fecha: {date.today()}")
 
 df_completo = cargar_datos()
 
@@ -136,7 +157,7 @@ with tab1:
             st.subheader("Rentabilidad por Fruta")
             st.plotly_chart(px.pie(df, values='Utilidad', names='Producto', hole=0.4), use_container_width=True)
     else:
-        st.info("👋 ¡Bienvenido! La base de datos está conectada pero vacía. Ve a la pestaña 'Nueva Operación' para registrar tu primer viaje.")
+        st.info("👋 ¡Bienvenido! La base de datos está conectada pero vacía o sin datos en este rango.")
 
 # --- TAB 2: CALCULADORA ---
 with tab2:
