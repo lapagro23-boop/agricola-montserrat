@@ -8,6 +8,7 @@ import io
 # --- 1. CONFIGURACIÓN Y CONEXIÓN ---
 st.set_page_config(page_title="Agrícola Montserrat 2026", layout="wide", page_icon="🍌")
 
+# Manejo robusto de errores de conexión
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
@@ -17,18 +18,26 @@ except:
 
 @st.cache_resource
 def init_connection():
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    try:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        st.error(f"Error conectando con Supabase: {e}")
+        return None
 
 supabase = init_connection()
 BUCKET_FACTURAS = "facturas" 
 
 # --- 2. FUNCIONES DE BASE DE DATOS (NUBE) ---
 def cargar_datos():
+    if not supabase: return pd.DataFrame()
+    
     try:
+        # Intentamos traer los datos. Si la tabla no existe o hay error, salta al except
         response = supabase.table("ventas_2026").select("*").execute()
         df = pd.DataFrame(response.data)
         
         if not df.empty:
+            # Mapeo exacto de tus columnas
             mapa_cols = {
                 'fecha': 'Fecha', 'producto': 'Producto', 'proveedor': 'Proveedor', 
                 'cliente': 'Cliente', 'fec_doc_url': 'FEC_Doc', 'fev_doc_url': 'FEV_Doc', 
@@ -37,11 +46,16 @@ def cargar_datos():
                 'precio_venta': 'Precio_Venta', 'retenciones': 'Retenciones', 'descuentos': 'Descuentos',
                 'utilidad': 'Utilidad', 'estado_pago': 'Estado_Pago', 'dias_credito': 'Dias_Credito'
             }
+            # Solo renombramos si las columnas coinciden
             df = df.rename(columns=mapa_cols)
-            df['Fecha'] = pd.to_datetime(df['Fecha'])
+            # Aseguramos tipos de datos
+            if 'Fecha' in df.columns:
+                df['Fecha'] = pd.to_datetime(df['Fecha'])
             return df
+            
     except Exception as e:
-        st.error(f"Error conectando a la base de datos: {e}")
+        # Si falla, mostramos el error pero no rompemos la app
+        st.warning(f"Esperando datos... (Detalle: {e})")
     
     # Estructura vacía por defecto
     columnas = ["Fecha", "Producto", "Proveedor", "Cliente", "FEC_Doc", "FEV_Doc", 
@@ -51,7 +65,7 @@ def cargar_datos():
     return pd.DataFrame(columns=columnas)
 
 def subir_archivo(archivo, nombre_base):
-    if archivo:
+    if archivo and supabase:
         try:
             nombre_archivo = f"{nombre_base}_{archivo.name}"
             archivo_bytes = archivo.getvalue()
@@ -62,8 +76,7 @@ def subir_archivo(archivo, nombre_base):
             )
             return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
         except Exception as e:
-            # Si falla la subida, no detenemos la app, solo avisamos
-            st.warning(f"No se pudo subir la imagen: {e}")
+            st.warning(f"Nota: No se pudo subir imagen al bucket (¿Existe el bucket 'facturas'?). {e}")
             return ""
     return ""
 
@@ -90,11 +103,11 @@ st.sidebar.header("⚙️ Controles")
 f_ini = st.sidebar.date_input("Inicio", date(2026, 1, 1))
 f_fin = st.sidebar.date_input("Fin", date(2026, 12, 31))
 
-if not df_completo.empty:
+if not df_completo.empty and 'Fecha' in df_completo.columns:
     mask = (df_completo['Fecha'].dt.date >= f_ini) & (df_completo['Fecha'].dt.date <= f_fin)
     df = df_completo.loc[mask].copy()
 else:
-    df = df_completo.copy()
+    df = pd.DataFrame(columns=df_completo.columns)
 
 tab1, tab2, tab3 = st.tabs(["📊 Balance de Peso", "🧮 Nueva Operación", "🚦 Cartera"])
 
@@ -123,7 +136,7 @@ with tab1:
             st.subheader("Rentabilidad por Fruta")
             st.plotly_chart(px.pie(df, values='Utilidad', names='Producto', hole=0.4), use_container_width=True)
     else:
-        st.info("No hay datos para mostrar. Carga el primer viaje en la siguiente pestaña.")
+        st.info("👋 ¡Bienvenido! La base de datos está conectada pero vacía. Ve a la pestaña 'Nueva Operación' para registrar tu primer viaje.")
 
 # --- TAB 2: CALCULADORA ---
 with tab2:
@@ -201,4 +214,5 @@ with tab3:
         )
     else:
         st.write("Aún no hay registros en la base de datos.")
+
 
