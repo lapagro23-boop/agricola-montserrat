@@ -59,7 +59,8 @@ def cargar_datos():
                 'kg_compra': 'Kg_Compra', 'precio_compra': 'Precio_Compra', 'fletes': 'Fletes',
                 'viaticos': 'Viaticos', 'otros_gastos': 'Otros_Gastos', 'kg_venta': 'Kg_Venta',
                 'precio_venta': 'Precio_Venta', 'retenciones': 'Retenciones', 'descuentos': 'Descuentos',
-                'utilidad': 'Utilidad', 'estado_pago': 'Estado_Pago', 'dias_credito': 'Dias_Credito'
+                'utilidad': 'Utilidad', 'estado_pago': 'Estado_Pago', 'dias_credito': 'Dias_Credito',
+                'precio_plaza': 'Precio_Plaza' # NUEVO CAMPO
             }
             df = df.rename(columns={k: v for k, v in mapa_cols.items() if k in df.columns})
             
@@ -72,6 +73,12 @@ def cargar_datos():
                 if col in df.columns:
                     df[col] = df[col].replace({'': None, 'None': None, 'nan': None})
             
+            # Asegurar que Precio_Plaza exista y sea numérico
+            if 'Precio_Plaza' not in df.columns:
+                df['Precio_Plaza'] = 0.0
+            else:
+                df['Precio_Plaza'] = pd.to_numeric(df['Precio_Plaza']).fillna(0.0)
+
             return df
     except Exception as e:
         st.warning(f"Esperando datos... (Detalle: {e})")
@@ -137,6 +144,7 @@ f_fin = st.sidebar.date_input("Fin", date(2026, 12, 31))
 
 df_completo = cargar_datos()
 
+# DESCARGA CSV
 if not df_completo.empty:
     st.sidebar.divider()
     st.sidebar.subheader("📂 Contabilidad")
@@ -181,14 +189,14 @@ if not df_completo.empty:
             else:
                 st.info("No hubo movimientos el mes anterior.")
 
-# FILTRO DE FECHAS
+# FILTRO FECHAS
 if not df_completo.empty:
     mask = (df_completo['Fecha'].dt.date >= f_ini) & (df_completo['Fecha'].dt.date <= f_fin)
     df = df_completo.loc[mask].copy()
 else:
     df = pd.DataFrame(columns=df_completo.columns)
 
-# PESTAÑAS (Aquí agregamos la nueva de Analítica)
+# PESTAÑAS
 tab1, tab_ana, tab2, tab3 = st.tabs(["📊 Dashboard", "📈 Analítica Avanzada", "🧮 Nueva Operación", "🚦 Cartera & Edición"])
 
 # --- TAB 1: DASHBOARD ---
@@ -208,45 +216,70 @@ with tab1:
     else:
         st.info("No hay datos en el rango seleccionado.")
 
-# --- TAB NUEVA: ANALÍTICA ---
+# --- TAB NUEVA: ANALÍTICA (Con Plaza) ---
 with tab_ana:
-    st.header("🧠 Inteligencia de Negocio")
+    st.header("🧠 Inteligencia de Mercado")
     if not df.empty:
-        # 1. Evolución de Precios
-        st.subheader("📉 Evolución de Precios (Compra vs Venta)")
-        # Ordenamos por fecha para que la línea salga bien
-        df_line = df.sort_values("Fecha")
-        fig_line = px.line(df_line, x='Fecha', y=['Precio_Compra', 'Precio_Venta'], color='Producto', markers=True,
-                           title="Comportamiento del Precio por Kilo en el tiempo")
-        st.plotly_chart(fig_line, use_container_width=True)
+        # Filtrar solo los que tienen dato de plaza válido
+        df_plaza = df[df['Precio_Plaza'] > 0].copy()
         
-        col_a, col_b = st.columns(2)
+        # 1. Gráfica Comparativa (Compra vs Plaza)
+        col_graf, col_info = st.columns([2, 1])
         
-        # 2. Top Clientes
-        with col_a:
-            st.subheader("🏆 Top Clientes (Por Utilidad)")
+        with col_graf:
+            st.subheader("📉 Nosotros (Azul) vs. La Plaza (Rojo)")
+            if not df_plaza.empty:
+                df_line = df_plaza.sort_values("Fecha")
+                fig_line = px.line(df_line, x='Fecha', y=['Precio_Compra', 'Precio_Plaza'], 
+                                   markers=True, title="Histórico de Precios")
+                # Personalizamos colores
+                new_names = {'Precio_Compra': 'Mi Compra (Campesino)', 'Precio_Plaza': 'Precio Mercado (Plaza)'}
+                fig_line.for_each_trace(lambda t: t.update(name = new_names[t.name],
+                                                         legendgroup = new_names[t.name],
+                                                         hovertemplate = t.hovertemplate.replace(t.name, new_names[t.name])
+                                                         ))
+                st.plotly_chart(fig_line, use_container_width=True)
+            else:
+                st.info("Aún no tienes registros con 'Precio Plaza' para mostrar la comparación.")
+
+        with col_info:
+            st.subheader("💡 Informe de Competitividad")
+            if not df_plaza.empty:
+                prom_compra = df_plaza['Precio_Compra'].mean()
+                prom_plaza = df_plaza['Precio_Plaza'].mean()
+                diff = prom_plaza - prom_compra
+                ahorro_perc = (diff / prom_plaza * 100) if prom_plaza > 0 else 0
+                
+                st.metric("Precio Promedio Plaza", f"${prom_plaza:,.0f}")
+                st.metric("Mi Precio Promedio", f"${prom_compra:,.0f}")
+                
+                if diff > 0:
+                    st.success(f"✅ ¡Excelente! Estás comprando ${diff:,.0f} más barato que la plaza ({ahorro_perc:.1f}% de ventaja).")
+                elif diff < 0:
+                    st.error(f"⚠️ Cuidado: Estás pagando ${abs(diff):,.0f} más caro que el precio de mercado.")
+                else:
+                    st.warning("Estás comprando al mismo precio que la plaza.")
+            else:
+                st.write("Registra nuevos viajes con el dato de 'Precio Plaza' para ver tu ventaja competitiva aquí.")
+
+        st.divider()
+        # Otros rankings
+        c_a, c_b = st.columns(2)
+        with c_a:
+            st.markdown("**🏆 Top Clientes (Utilidad)**")
             df_cli = df.groupby('Cliente')[['Utilidad']].sum().reset_index().sort_values('Utilidad', ascending=True)
-            fig_cli = px.bar(df_cli, x='Utilidad', y='Cliente', orientation='h', text_auto='.2s', color='Utilidad')
-            st.plotly_chart(fig_cli, use_container_width=True)
-            
-        # 3. Calidad Proveedores (Merma)
-        with col_b:
-            st.subheader("⚖️ Calidad Proveedores (% Merma)")
-            # Calculamos % de merma: (KgCompra - KgVenta) / KgCompra
-            # Positivo es Merma (Malo), Negativo es Ganancia (Bueno)
+            st.plotly_chart(px.bar(df_cli, x='Utilidad', y='Cliente', orientation='h', color='Utilidad'), use_container_width=True)
+        with c_b:
+            st.markdown("**⚖️ Calidad Prov. (% Merma)**")
             df_prov = df.groupby('Proveedor')[['Kg_Compra', 'Kg_Venta']].sum().reset_index()
             df_prov['Diferencia'] = df_prov['Kg_Compra'] - df_prov['Kg_Venta']
             df_prov['% Merma'] = (df_prov['Diferencia'] / df_prov['Kg_Compra']) * 100
+            st.plotly_chart(px.bar(df_prov, x='Proveedor', y='% Merma', color='% Merma', color_continuous_scale=["green", "red"]), use_container_width=True)
             
-            # Colorear: Verde si es ganancia (merma negativa), Rojo si es pérdida
-            fig_prov = px.bar(df_prov, x='Proveedor', y='% Merma', color='% Merma',
-                              title="Porcentaje de Merma (Barras bajas/verdes es mejor)",
-                              color_continuous_scale=["green", "yellow", "red"])
-            st.plotly_chart(fig_prov, use_container_width=True)
     else:
-        st.info("Necesitas más datos para ver las analíticas.")
+        st.info("Necesitas datos.")
 
-# --- TAB 2: REGISTRO ---
+# --- TAB 2: REGISTRO (Con Campo Plaza) ---
 with tab2:
     st.header("Registrar Viaje")
     with st.form("registro_viaje", clear_on_submit=True):
@@ -255,25 +288,28 @@ with tab2:
         
         l_prod = obtener_opciones(df_completo, 'Producto', ["Plátano", "Guayabo"])
         s_prod = r2.selectbox("Fruta", l_prod)
-        n_prod = r2.text_input("¿Otra fruta?", placeholder="Escribe si no está en lista")
+        n_prod = r2.text_input("¿Otra fruta?", placeholder="Escribe si no está")
         
         l_prov = obtener_opciones(df_completo, 'Proveedor', ["Omar", "Rancho"])
         s_prov = r3.selectbox("Proveedor", l_prov)
-        n_prov = r3.text_input("¿Otro proveedor?", placeholder="Escribe si no está en lista")
+        n_prov = r3.text_input("¿Otro proveedor?", placeholder="Escribe si no está")
 
         l_cli = obtener_opciones(df_completo, 'Cliente', ["Calima", "Fogón", "HEFE"])
         s_cli = r4.selectbox("Cliente", l_cli)
-        n_cli = r4.text_input("¿Otro cliente?", placeholder="Escribe si no está en lista")
+        n_cli = r4.text_input("¿Otro cliente?", placeholder="Escribe si no está")
 
         col_c, col_v = st.columns(2)
         with col_c:
             kgc = st.number_input("Kg Compra", min_value=0.0)
-            pc = st.number_input("Precio Compra", min_value=0.0)
+            pc = st.number_input("Precio Compra (Campesino)", min_value=0.0, format="%.0f")
+            # NUEVO CAMPO: PRECIO PLAZA
+            pplaza = st.number_input("Precio en Plaza (Referencia)", min_value=0.0, format="%.0f", help="¿A cómo está en el mercado hoy?")
             fl = st.number_input("Fletes", min_value=0.0)
             fec_file = st.file_uploader("Factura Compra (PDF/Foto)")
+
         with col_v:
             kgv = st.number_input("Kg Venta", min_value=0.0)
-            pv = st.number_input("Precio Venta", min_value=0.0)
+            pv = st.number_input("Precio Venta", min_value=0.0, format="%.0f")
             desc = st.number_input("Deducciones", min_value=0.0)
             fev_file = st.file_uploader("Factura Venta (PDF/Foto)")
 
@@ -298,6 +334,7 @@ with tab2:
                         "kg_compra": kgc, "precio_compra": pc, "fletes": fl, "viaticos": 0, "otros_gastos": 0,
                         "kg_venta": kgv, "precio_venta": pv, "retenciones": 0, "descuentos": desc,
                         "utilidad": util_est, "estado_pago": estado, "dias_credito": dias,
+                        "precio_plaza": pplaza, # Guardamos el nuevo dato
                         "fec_doc_url": uc if uc else "", "fev_doc_url": uv if uv else ""
                     }
                     supabase.table("ventas_2026").insert(data).execute()
@@ -312,10 +349,11 @@ with tab3:
     st.subheader("Historial (Selecciona fila para Editar)")
     if not df.empty:
         column_cfg = {
-            "FEC_Doc": st.column_config.LinkColumn("F. Compra", display_text="📎 Ver Doc"),
-            "FEV_Doc": st.column_config.LinkColumn("F. Venta", display_text="📎 Ver Doc"),
+            "FEC_Doc": st.column_config.LinkColumn("F. Compra", display_text="📎 Doc"),
+            "FEV_Doc": st.column_config.LinkColumn("F. Venta", display_text="📎 Doc"),
             "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-            "Utilidad": st.column_config.NumberColumn("Utilidad", format="$%d")
+            "Utilidad": st.column_config.NumberColumn("Utilidad", format="$%d"),
+            "Precio_Plaza": st.column_config.NumberColumn("Ref. Plaza", format="$%d")
         }
 
         event = st.dataframe(
@@ -339,13 +377,14 @@ with tab3:
                 c1, c2, c3, c4 = st.columns(4)
                 e_kgc = c1.number_input("Kg Compra", value=float(row_data['Kg_Compra']))
                 e_pc = c2.number_input("Precio Compra", value=float(row_data['Precio_Compra']))
-                e_kgv = c3.number_input("Kg Venta", value=float(row_data['Kg_Venta']))
-                e_pv = c4.number_input("Precio Venta", value=float(row_data['Precio_Venta']))
-
-                c5, c6 = st.columns(2)
-                e_est = c5.selectbox("Estado", ["Pagado", "Pendiente"], index=0 if row_data['Estado_Pago'] == "Pagado" else 1)
+                e_plaza = c3.number_input("Precio Plaza (Ref)", value=float(row_data['Precio_Plaza'])) # Editable
+                e_kgv = c4.number_input("Kg Venta", value=float(row_data['Kg_Venta']))
                 
-                st.caption("Subir archivos (solo si deseas cambiar los actuales):")
+                c5, c6 = st.columns(2)
+                e_pv = c5.number_input("Precio Venta", value=float(row_data['Precio_Venta']))
+                e_est = c6.selectbox("Estado", ["Pagado", "Pendiente"], index=0 if row_data['Estado_Pago'] == "Pagado" else 1)
+                
+                st.caption("Archivos:")
                 col_fa, col_fb = st.columns(2)
                 e_file_c = col_fa.file_uploader("Nueva Fac. Compra")
                 e_file_v = col_fb.file_uploader("Nueva Fac. Venta")
@@ -357,6 +396,7 @@ with tab3:
                     updates = {
                         "kg_compra": e_kgc, "precio_compra": e_pc,
                         "kg_venta": e_kgv, "precio_venta": e_pv,
+                        "precio_plaza": e_plaza, # Actualizamos plaza
                         "estado_pago": e_est,
                         "utilidad": new_util
                     }
@@ -378,6 +418,7 @@ with tab3:
                 st.rerun()
     else:
         st.write("No hay registros.")
+
 
 
 
