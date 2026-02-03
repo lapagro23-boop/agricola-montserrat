@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from supabase import create_client, Client
 import io
 
@@ -44,14 +44,15 @@ supabase = init_connection()
 BUCKET_FACTURAS = "facturas" 
 
 # --- 2. FUNCIONES DE LÓGICA ---
-# Quitamos el cache de datos para que las listas desplegables se actualicen al instante
 def cargar_datos():
     if not supabase: return pd.DataFrame()
     try:
-        response = supabase.table("ventas_2026").select("*").execute()
+        # Traemos también el 'id' para poder editar
+        response = supabase.table("ventas_2026").select("*").order("fecha", desc=True).execute()
         df = pd.DataFrame(response.data)
         if not df.empty:
             mapa_cols = {
+                'id': 'ID', # Importante para editar
                 'fecha': 'Fecha', 'producto': 'Producto', 'proveedor': 'Proveedor', 
                 'cliente': 'Cliente', 'fec_doc_url': 'FEC_Doc', 'fev_doc_url': 'FEV_Doc', 
                 'kg_compra': 'Kg_Compra', 'precio_compra': 'Precio_Compra', 'fletes': 'Fletes',
@@ -59,38 +60,41 @@ def cargar_datos():
                 'precio_venta': 'Precio_Venta', 'retenciones': 'Retenciones', 'descuentos': 'Descuentos',
                 'utilidad': 'Utilidad', 'estado_pago': 'Estado_Pago', 'dias_credito': 'Dias_Credito'
             }
-            df = df.rename(columns=mapa_cols)
+            # Renombramos solo las que existen
+            df = df.rename(columns={k: v for k, v in mapa_cols.items() if k in df.columns})
+            
             if 'Fecha' in df.columns:
                 df['Fecha'] = pd.to_datetime(df['Fecha'])
+            
+            # Aseguramos que las URLs sean strings válidos
+            cols_url = ['FEC_Doc', 'FEV_Doc']
+            for col in cols_url:
+                if col in df.columns:
+                    df[col] = df[col].fillna("").astype(str)
+                    # Si dice "None" o está vacío, lo dejamos vacío real
+                    df.loc[df[col].isin(["None", "nan", ""]), col] = None
             
             return df
     except Exception as e:
         st.warning(f"Esperando datos... (Detalle: {e})")
     
-    return pd.DataFrame(columns=["Fecha", "Producto", "Proveedor", "Cliente", "FEC_Doc", "FEV_Doc", 
-               "Kg_Compra", "Precio_Compra", "Fletes", "Viaticos", "Otros_Gastos",
-               "Kg_Venta", "Precio_Venta", "Retenciones", "Descuentos", 
-               "Utilidad", "Estado_Pago", "Dias_Credito"])
+    return pd.DataFrame()
 
 def subir_archivo(archivo, nombre_base):
     if archivo and supabase:
         try:
-            # Limpiamos nombre y añadimos timestamp para evitar duplicados
             nombre_clean = "".join(c for c in archivo.name if c.isalnum() or c in "._- ")
-            nombre_archivo = f"{nombre_base}_{date.today()}_{nombre_clean}"
+            nombre_archivo = f"{nombre_base}_{datetime.now().strftime('%H%M%S')}_{nombre_clean}"
             archivo_bytes = archivo.getvalue()
             
-            # Subir
             supabase.storage.from_(BUCKET_FACTURAS).upload(
                 path=nombre_archivo, 
                 file=archivo_bytes, 
                 file_options={"content-type": archivo.type}
             )
-            # Obtener URL pública
-            url = supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
-            return url
+            return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
         except Exception as e:
-            st.warning(f"Error subiendo imagen (Verifica que el bucket '{BUCKET_FACTURAS}' sea público): {e}")
+            st.warning(f"Error subiendo: {e}")
             return None
     return None
 
@@ -109,55 +113,44 @@ def color_deuda(row):
     except: pass
     return [color] * len(row)
 
-# Función auxiliar para gestionar los desplegables inteligentes
 def obtener_opciones(df, col, defaults):
     existentes = df[col].unique().tolist() if not df.empty and col in df.columns else []
-    # Unimos defaults con existentes, eliminamos duplicados y vacíos
-    opciones = sorted(list(set(defaults + [x for x in existentes if x])))
-    opciones.append("➕ Nuevo...")
-    return opciones
+    lista_final = sorted(list(set(defaults + [x for x in existentes if x])))
+    lista_final.append("➕ Nuevo...")
+    return lista_final
 
 # --- INICIO DE LA INTERFAZ ---
 st.title("🌱 Agrícola Montserrat - Gestión Global")
 
 df_completo = cargar_datos()
 
-# 🔔 ZONA DE ALERTAS
+# 🔔 ALERTAS
 if not df_completo.empty:
     hoy = date.today()
-    
-    # 1. Alerta de Vencimientos
-    pendientes = df_completo[df_completo['Estado_Pago'] == 'Pendiente'].copy()
-    if not pendientes.empty:
-        pendientes['Dias_Credito'] = pd.to_numeric(pendientes['Dias_Credito'], errors='coerce').fillna(0)
-        pendientes['Vence'] = (pendientes['Fecha'] + pd.to_timedelta(pendientes['Dias_Credito'], unit='D')).dt.date
-        pendientes['Dias_Restantes'] = (pendientes['Vence'] - hoy).apply(lambda x: x.days)
-        
-        urgentes = pendientes[pendientes['Dias_Restantes'] <= 3]
-        if not urgentes.empty:
-            st.error(f"🔔 ¡ATENCIÓN! Tienes {len(urgentes)} facturas por cobrar críticas.")
-            df_urgentes_show = urgentes[['Cliente', 'Utilidad', 'Dias_Restantes', 'Vence']].sort_values('Dias_Restantes')
-            st.dataframe(df_urgentes_show.style.format({"Utilidad": "${:,.0f}"}), use_container_width=True)
+    # 1. Vencimientos
+    if 'Estado_Pago' in df_completo.columns:
+        pendientes = df_completo[df_completo['Estado_Pago'] == 'Pendiente'].copy()
+        if not pendientes.empty:
+            pendientes['Dias_Credito'] = pd.to_numeric(pendientes['Dias_Credito'], errors='coerce').fillna(0)
+            pendientes['Vence'] = (pendientes['Fecha'] + pd.to_timedelta(pendientes['Dias_Credito'], unit='D')).dt.date
+            pendientes['Dias_Restantes'] = (pendientes['Vence'] - hoy).apply(lambda x: x.days)
+            
+            urgentes = pendientes[pendientes['Dias_Restantes'] <= 3]
+            if not urgentes.empty:
+                st.error(f"🔔 ¡ATENCIÓN! {len(urgentes)} facturas críticas.")
 
-    # 2. Resumen Mensual
+    # 2. Resumen Mes
     if hoy.day <= 5:
-        primer_dia_mes_actual = hoy.replace(day=1)
-        ultimo_dia_mes_anterior = primer_dia_mes_actual - timedelta(days=1)
-        mes_anterior_inicio = ultimo_dia_mes_anterior.replace(day=1)
+        primer = hoy.replace(day=1)
+        ultimo_anterior = primer - timedelta(days=1)
+        inicio_anterior = ultimo_anterior.replace(day=1)
         
-        mask_mes = (df_completo['Fecha'].dt.date >= mes_anterior_inicio) & (df_completo['Fecha'].dt.date <= ultimo_dia_mes_anterior)
-        df_mes = df_completo.loc[mask_mes]
-        
+        mask = (df_completo['Fecha'].dt.date >= inicio_anterior) & (df_completo['Fecha'].dt.date <= ultimo_anterior)
+        df_mes = df_completo.loc[mask]
         if not df_mes.empty:
-            nombre_mes = ultimo_dia_mes_anterior.strftime("%B")
-            st.info(f"📅 **Resumen del Mes Anterior ({nombre_mes})**")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Ventas Totales", f"${df_mes['Utilidad'].sum():,.0f}")
-            m2.metric("Kg Vendidos", f"{df_mes['Kg_Venta'].sum():,.1f}")
-            rentabilidad = (df_mes['Utilidad'].sum() / (df_mes['Kg_Venta'].sum() * df_mes['Precio_Venta'].mean())) * 100 if df_mes['Kg_Venta'].sum() > 0 else 0
-            m3.metric("Rentabilidad Aprox", f"{rentabilidad:.1f}%")
+            st.info(f"📅 Resumen {ultimo_anterior.strftime('%B')}: Ventas ${df_mes['Utilidad'].sum():,.0f} | {df_mes['Kg_Venta'].sum():,.0f} Kg")
 
-# BARRA LATERAL
+# SIDEBAR
 st.sidebar.header("⚙️ Filtros")
 f_ini = st.sidebar.date_input("Inicio", date(2026, 1, 1))
 f_fin = st.sidebar.date_input("Fin", date(2026, 12, 31))
@@ -168,130 +161,145 @@ if not df_completo.empty:
 else:
     df = pd.DataFrame(columns=df_completo.columns)
 
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🧮 Nueva Operación", "🚦 Cartera & Archivos"])
+tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🧮 Nueva Operación", "🚦 Cartera & Edición"])
 
 # --- TAB 1: DASHBOARD ---
 with tab1:
     if not df.empty:
         df['Diferencia_Kg'] = df['Kg_Venta'] - df['Kg_Compra']
-        merma_solo = df[df['Diferencia_Kg'] < 0]['Diferencia_Kg'].sum()
-        ganancia_solo = df[df['Diferencia_Kg'] > 0]['Diferencia_Kg'].sum()
+        merma = df[df['Diferencia_Kg'] < 0]['Diferencia_Kg'].sum()
+        ganancia = df[df['Diferencia_Kg'] > 0]['Diferencia_Kg'].sum()
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("💰 Utilidad Neta", f"${df['Utilidad'].sum():,.0f}")
+        c1.metric("💰 Utilidad", f"${df['Utilidad'].sum():,.0f}")
         c2.metric("📦 Kg Movidos", f"{df['Kg_Venta'].sum():,.1f}")
-        c3.metric("⚖️ Merma", f"{abs(merma_solo):,.1f} Kg", delta_color="inverse")
-        c4.metric("📈 Ganancia Peso", f"{ganancia_solo:,.1f} Kg")
-
-        st.divider()
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            dg = df.groupby('Proveedor')[['Diferencia_Kg']].sum().reset_index()
-            fig = px.bar(dg, x='Proveedor', y='Diferencia_Kg', title="Balance de Kilos por Proveedor",
-                         color='Diferencia_Kg', color_continuous_scale=['red', 'gray', 'green'])
-            st.plotly_chart(fig, use_container_width=True)
-        with col_g2:
-            st.plotly_chart(px.pie(df, values='Utilidad', names='Producto', title="Utilidad por Fruta", hole=0.4), use_container_width=True)
+        c3.metric("⚖️ Merma", f"{abs(merma):,.1f} Kg", delta_color="inverse")
+        c4.metric("📈 Ganancia", f"{ganancia:,.1f} Kg")
+        
+        st.plotly_chart(px.bar(df, x='Proveedor', y='Utilidad', color='Producto', title="Utilidad por Proveedor"), use_container_width=True)
     else:
-        st.info("Sin datos en el rango seleccionado.")
+        st.info("No hay datos.")
 
-# --- TAB 2: CALCULADORA (CON DESPLEGABLES INTELIGENTES) ---
+# --- TAB 2: REGISTRO ---
 with tab2:
     st.header("Registrar Viaje")
     with st.form("registro_viaje", clear_on_submit=True):
         r1, r2, r3, r4 = st.columns(4)
         fecha_in = r1.date_input("Fecha", date.today())
         
-        # Lógica de Desplegables "Auto-Learning"
-        lista_frutas = obtener_opciones(df_completo, 'Producto', ["Plátano", "Guayabo"])
-        sel_fruta = r2.selectbox("Fruta", lista_frutas)
-        if sel_fruta == "➕ Nuevo...":
-            fruta_final = r2.text_input("Escribe la nueva fruta", placeholder="Ej: Maracuyá")
-        else:
-            fruta_final = sel_fruta
+        # Desplegables
+        l_prod = obtener_opciones(df_completo, 'Producto', ["Plátano", "Guayabo"])
+        s_prod = r2.selectbox("Fruta", l_prod)
+        t_prod = r2.text_input("Nombre Nueva Fruta") if s_prod == "➕ Nuevo..." else ""
 
-        lista_prov = obtener_opciones(df_completo, 'Proveedor', ["Omar", "Rancho"])
-        sel_prov = r3.selectbox("Proveedor", lista_prov)
-        if sel_prov == "➕ Nuevo...":
-            prov_final = r3.text_input("Escribe el nuevo proveedor")
-        else:
-            prov_final = sel_prov
+        l_prov = obtener_opciones(df_completo, 'Proveedor', ["Omar", "Rancho"])
+        s_prov = r3.selectbox("Proveedor", l_prov)
+        t_prov = r3.text_input("Nombre Nuevo Prov.") if s_prov == "➕ Nuevo..." else ""
 
-        lista_cli = obtener_opciones(df_completo, 'Cliente', ["Calima", "Fogón", "HEFE"])
-        sel_cli = r4.selectbox("Cliente", lista_cli)
-        if sel_cli == "➕ Nuevo...":
-            cli_final = r4.text_input("Escribe el nuevo cliente")
-        else:
-            cli_final = sel_cli
+        l_cli = obtener_opciones(df_completo, 'Cliente', ["Calima", "Fogón", "HEFE"])
+        s_cli = r4.selectbox("Cliente", l_cli)
+        t_cli = r4.text_input("Nombre Nuevo Cli.") if s_cli == "➕ Nuevo..." else ""
 
-        st.divider()
         col_c, col_v = st.columns(2)
         with col_c:
-            st.subheader("Compra")
             kgc = st.number_input("Kg Compra", min_value=0.0)
             pc = st.number_input("Precio Compra", min_value=0.0)
-            fl = st.number_input("Fletes/Gastos", min_value=0.0)
-            fec_file = st.file_uploader("Factura Compra (Foto/PDF)")
-
+            fl = st.number_input("Fletes", min_value=0.0)
+            fec_file = st.file_uploader("Factura Compra")
         with col_v:
-            st.subheader("Venta")
             kgv = st.number_input("Kg Venta", min_value=0.0)
             pv = st.number_input("Precio Venta", min_value=0.0)
             desc = st.number_input("Deducciones", min_value=0.0)
-            fev_file = st.file_uploader("Factura Venta (Foto/PDF)")
+            fev_file = st.file_uploader("Factura Venta")
 
         util_est = (kgv * pv) - (kgc * pc) - fl - desc
         st.metric("💰 Utilidad Estimada", f"${util_est:,.0f}")
         
-        ce1, ce2 = st.columns(2)
-        estado = ce1.selectbox("Estado Pago", ["Pagado", "Pendiente"])
-        dias = ce2.number_input("Días Crédito", 8)
+        estado = st.selectbox("Estado", ["Pagado", "Pendiente"])
+        dias = st.number_input("Días Crédito", 8)
 
-        if st.form_submit_button("☁️ Guardar Viaje"):
-            # Validamos que se haya elegido algo válido (no dejar el "Nuevo..." seleccionado sin escribir nada)
-            if prov_final and cli_final and prov_final != "➕ Nuevo..." and cli_final != "➕ Nuevo...":
-                with st.spinner("Subiendo archivos y datos..."):
-                    url_compra = subir_archivo(fec_file, f"compra_{prov_final}")
-                    url_venta = subir_archivo(fev_file, f"venta_{cli_final}")
+        if st.form_submit_button("☁️ Guardar"):
+            # Lógica de selección final
+            fin_prod = t_prod if s_prod == "➕ Nuevo..." else s_prod
+            fin_prov = t_prov if s_prov == "➕ Nuevo..." else s_prov
+            fin_cli = t_cli if s_cli == "➕ Nuevo..." else s_cli
 
-                    datos_nuevos = {
-                        "fecha": str(fecha_in),
-                        "producto": fruta_final, "proveedor": prov_final, "cliente": cli_final,
-                        "fec_doc_url": url_compra if url_compra else "",
-                        "fev_doc_url": url_venta if url_venta else "",
+            if fin_prov and fin_cli:
+                with st.spinner("Guardando..."):
+                    uc = subir_archivo(fec_file, f"compra_{fin_prov}")
+                    uv = subir_archivo(fev_file, f"venta_{fin_cli}")
+                    
+                    data = {
+                        "fecha": str(fecha_in), "producto": fin_prod, "proveedor": fin_prov, "cliente": fin_cli,
                         "kg_compra": kgc, "precio_compra": pc, "fletes": fl, "viaticos": 0, "otros_gastos": 0,
                         "kg_venta": kgv, "precio_venta": pv, "retenciones": 0, "descuentos": desc,
-                        "utilidad": util_est, "estado_pago": estado, "dias_credito": dias
+                        "utilidad": util_est, "estado_pago": estado, "dias_credito": dias,
+                        "fec_doc_url": uc if uc else "", "fev_doc_url": uv if uv else ""
                     }
-                    
-                    try:
-                        supabase.table("ventas_2026").insert(datos_nuevos).execute()
-                        st.success("✅ ¡Registro guardado! Si usaste un cliente/proveedor nuevo, ya aparecerá en la lista la próxima vez.")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Error: {e}")
-            else: st.error("Falta Proveedor o Cliente (o no escribiste el nombre nuevo).")
+                    supabase.table("ventas_2026").insert(data).execute()
+                    st.success("Guardado!")
+                    st.rerun()
+            else:
+                st.error("Faltan nombres obligatorios.")
 
-# --- TAB 3: CARTERA ---
+# --- TAB 3: CARTERA Y EDICIÓN ---
 with tab3:
-    st.subheader("Historial de Operaciones")
+    st.subheader("Historial (Selecciona para Editar)")
     if not df.empty:
-        # Preparamos el dataframe para que los links funcionen
-        # IMPORTANTE: Si la celda no tiene URL, ponemos None para que no salga el link roto
-        df_display = df.copy()
-        
-        st.dataframe(
-            df_display.style.apply(color_deuda, axis=1).format({"Utilidad": "${:,.0f}", "Kg_Venta": "{:,.1f}"}), 
+        # 1. Tabla con selección
+        event = st.dataframe(
+            df.style.apply(color_deuda, axis=1).format({"Utilidad": "${:,.0f}"}),
             use_container_width=True,
             column_config={
-                "FEC_Doc": st.column_config.LinkColumn("📎 F. Compra", display_text="Ver Doc"),
-                "FEV_Doc": st.column_config.LinkColumn("📎 F. Venta", display_text="Ver Doc"),
+                "FEC_Doc": st.column_config.LinkColumn("F. Compra", display_text="📎 Ver"),
+                "FEV_Doc": st.column_config.LinkColumn("F. Venta", display_text="📎 Ver"),
                 "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
             },
+            selection_mode="single-row",
+            on_select="rerun",
             hide_index=True
         )
+
+        # 2. Formulario de Edición
+        if event.selection.rows:
+            idx = event.selection.rows[0]
+            row_data = df.iloc[idx]
+            id_row = row_data['ID']
+
+            st.divider()
+            st.markdown(f"### ✏️ Editando Viaje de: **{row_data['Proveedor']}** -> **{row_data['Cliente']}** ({row_data['Fecha'].date()})")
+            
+            with st.form("form_edicion"):
+                c1, c2, c3 = st.columns(3)
+                e_kgv = c1.number_input("Kg Venta", value=float(row_data['Kg_Venta']))
+                e_pv = c2.number_input("Precio Venta", value=float(row_data['Precio_Venta']))
+                e_est = c3.selectbox("Estado", ["Pagado", "Pendiente"], index=0 if row_data['Estado_Pago'] == "Pagado" else 1)
+                
+                # Archivos (Opcional reemplazar)
+                st.caption("Subir nuevos archivos solo si deseas reemplazar los actuales:")
+                e_file_c = st.file_uploader("Reemplazar Fac. Compra")
+                e_file_v = st.file_uploader("Reemplazar Fac. Venta")
+
+                if st.form_submit_button("💾 Actualizar Registro"):
+                    updates = {
+                        "kg_venta": e_kgv,
+                        "precio_venta": e_pv,
+                        "estado_pago": e_est,
+                        # Recalcular utilidad automáticamente al editar
+                        "utilidad": (e_kgv * e_pv) - (row_data['Kg_Compra'] * row_data['Precio_Compra']) - row_data['Fletes'] - row_data['Descuentos']
+                    }
+                    
+                    if e_file_c:
+                        updates["fec_doc_url"] = subir_archivo(e_file_c, f"edit_compra_{row_data['Proveedor']}")
+                    if e_file_v:
+                        updates["fev_doc_url"] = subir_archivo(e_file_v, f"edit_venta_{row_data['Cliente']}")
+                    
+                    supabase.table("ventas_2026").update(updates).eq("id", int(id_row)).execute()
+                    st.success("Registro actualizado.")
+                    st.rerun()
     else:
-        st.write("No hay registros disponibles.")
+        st.write("No hay datos.")
+
 
 
 
