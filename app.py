@@ -118,7 +118,6 @@ def obtener_opciones(df, col, defaults):
     existentes = df[col].unique().tolist() if not df.empty and col in df.columns else []
     return sorted(list(set(defaults + [x for x in existentes if x])))
 
-# Función para convertir DF a CSV para descargar
 @st.cache_data
 def convertir_df_a_csv(df):
     return df.to_csv(index=False).encode('utf-8')
@@ -126,10 +125,8 @@ def convertir_df_a_csv(df):
 # --- INICIO DE LA INTERFAZ ---
 st.title("🌱 Agrícola Montserrat - Gestión Global")
 
-# SIDEBAR & FILTROS
+# SIDEBAR
 st.sidebar.header("⚙️ Configuración")
-
-# 1. Botón Actualizar
 if st.sidebar.button("🔄 Actualizar Datos"):
     st.cache_data.clear()
     st.rerun()
@@ -138,10 +135,8 @@ st.sidebar.divider()
 f_ini = st.sidebar.date_input("Inicio", date(2026, 1, 1))
 f_fin = st.sidebar.date_input("Fin", date(2026, 12, 31))
 
-# Carga de datos
 df_completo = cargar_datos()
 
-# 2. Botón Descargar (NUEVO)
 if not df_completo.empty:
     st.sidebar.divider()
     st.sidebar.subheader("📂 Contabilidad")
@@ -155,52 +150,46 @@ if not df_completo.empty:
 
 ver_resumen = st.sidebar.checkbox("👁️ Ver Resumen Mensual", value=(date.today().day <= 5))
 
-# 🔔 ZONA DE ALERTAS Y RESUMEN
+# ALERTAS
 if not df_completo.empty:
     hoy = date.today()
-    
-    # Alerta de Cobros
     if 'Estado_Pago' in df_completo.columns:
         pendientes = df_completo[df_completo['Estado_Pago'] == 'Pendiente'].copy()
         if not pendientes.empty:
             pendientes['Dias_Credito'] = pd.to_numeric(pendientes['Dias_Credito'], errors='coerce').fillna(0)
             pendientes['Vence'] = (pendientes['Fecha'] + pd.to_timedelta(pendientes['Dias_Credito'], unit='D')).dt.date
             pendientes['Dias_Restantes'] = (pendientes['Vence'] - hoy).apply(lambda x: x.days)
-            
             urgentes = pendientes[pendientes['Dias_Restantes'] <= 3]
             if not urgentes.empty:
                 st.error(f"🔔 ¡ATENCIÓN! Tienes {len(urgentes)} facturas críticas por cobrar.")
 
-    # Resumen Mensual
     if ver_resumen:
         primer = hoy.replace(day=1)
         ultimo_anterior = primer - timedelta(days=1)
         inicio_anterior = ultimo_anterior.replace(day=1)
-        
         mask_mes = (df_completo['Fecha'].dt.date >= inicio_anterior) & (df_completo['Fecha'].dt.date <= ultimo_anterior)
         df_mes = df_completo.loc[mask_mes]
-        
         with st.expander(f"📅 Resumen del Mes Anterior ({ultimo_anterior.strftime('%B %Y')})", expanded=True):
             if not df_mes.empty:
                 c1, c2, c3 = st.columns(3)
                 util = df_mes['Utilidad'].sum()
                 vta = (df_mes['Kg_Venta'] * df_mes['Precio_Venta']).sum()
                 rent = (util / vta * 100) if vta > 0 else 0
-                
                 c1.metric("💵 Utilidad Total", f"${util:,.0f}")
                 c2.metric("📦 Kg Vendidos", f"{df_mes['Kg_Venta'].sum():,.1f}")
                 c3.metric("📊 Rentabilidad", f"{rent:.1f}%")
             else:
                 st.info("No hubo movimientos el mes anterior.")
 
-# FILTRO PRINCIPAL
+# FILTRO DE FECHAS
 if not df_completo.empty:
     mask = (df_completo['Fecha'].dt.date >= f_ini) & (df_completo['Fecha'].dt.date <= f_fin)
     df = df_completo.loc[mask].copy()
 else:
     df = pd.DataFrame(columns=df_completo.columns)
 
-tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "🧮 Nueva Operación", "🚦 Cartera & Edición"])
+# PESTAÑAS (Aquí agregamos la nueva de Analítica)
+tab1, tab_ana, tab2, tab3 = st.tabs(["📊 Dashboard", "📈 Analítica Avanzada", "🧮 Nueva Operación", "🚦 Cartera & Edición"])
 
 # --- TAB 1: DASHBOARD ---
 with tab1:
@@ -218,6 +207,44 @@ with tab1:
         st.plotly_chart(px.bar(df, x='Proveedor', y='Utilidad', color='Producto', title="Utilidad por Proveedor"), use_container_width=True)
     else:
         st.info("No hay datos en el rango seleccionado.")
+
+# --- TAB NUEVA: ANALÍTICA ---
+with tab_ana:
+    st.header("🧠 Inteligencia de Negocio")
+    if not df.empty:
+        # 1. Evolución de Precios
+        st.subheader("📉 Evolución de Precios (Compra vs Venta)")
+        # Ordenamos por fecha para que la línea salga bien
+        df_line = df.sort_values("Fecha")
+        fig_line = px.line(df_line, x='Fecha', y=['Precio_Compra', 'Precio_Venta'], color='Producto', markers=True,
+                           title="Comportamiento del Precio por Kilo en el tiempo")
+        st.plotly_chart(fig_line, use_container_width=True)
+        
+        col_a, col_b = st.columns(2)
+        
+        # 2. Top Clientes
+        with col_a:
+            st.subheader("🏆 Top Clientes (Por Utilidad)")
+            df_cli = df.groupby('Cliente')[['Utilidad']].sum().reset_index().sort_values('Utilidad', ascending=True)
+            fig_cli = px.bar(df_cli, x='Utilidad', y='Cliente', orientation='h', text_auto='.2s', color='Utilidad')
+            st.plotly_chart(fig_cli, use_container_width=True)
+            
+        # 3. Calidad Proveedores (Merma)
+        with col_b:
+            st.subheader("⚖️ Calidad Proveedores (% Merma)")
+            # Calculamos % de merma: (KgCompra - KgVenta) / KgCompra
+            # Positivo es Merma (Malo), Negativo es Ganancia (Bueno)
+            df_prov = df.groupby('Proveedor')[['Kg_Compra', 'Kg_Venta']].sum().reset_index()
+            df_prov['Diferencia'] = df_prov['Kg_Compra'] - df_prov['Kg_Venta']
+            df_prov['% Merma'] = (df_prov['Diferencia'] / df_prov['Kg_Compra']) * 100
+            
+            # Colorear: Verde si es ganancia (merma negativa), Rojo si es pérdida
+            fig_prov = px.bar(df_prov, x='Proveedor', y='% Merma', color='% Merma',
+                              title="Porcentaje de Merma (Barras bajas/verdes es mejor)",
+                              color_continuous_scale=["green", "yellow", "red"])
+            st.plotly_chart(fig_prov, use_container_width=True)
+    else:
+        st.info("Necesitas más datos para ver las analíticas.")
 
 # --- TAB 2: REGISTRO ---
 with tab2:
