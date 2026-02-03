@@ -62,7 +62,7 @@ def cargar_datos():
             if 'Fecha' in df.columns:
                 df['Fecha'] = pd.to_datetime(df['Fecha'])
             
-            # Limpiamos URLs vacías para que no rompan la tabla
+            # Limpiamos URLs vacías
             cols_url = ['FEC_Doc', 'FEV_Doc']
             for col in cols_url:
                 if col in df.columns:
@@ -80,18 +80,15 @@ def cargar_datos():
 def subir_archivo(archivo, nombre_base):
     if archivo and supabase:
         try:
-            # Limpiamos el nombre del archivo para evitar errores con caracteres especiales
             nombre_clean = "".join(c for c in archivo.name if c.isalnum() or c in "._- ")
             nombre_archivo = f"{nombre_base}_{date.today()}_{nombre_clean}"
             archivo_bytes = archivo.getvalue()
             
-            # Subir
             supabase.storage.from_(BUCKET_FACTURAS).upload(
                 path=nombre_archivo, 
                 file=archivo_bytes, 
                 file_options={"content-type": archivo.type}
             )
-            # Obtener URL pública
             return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
         except Exception as e:
             st.warning(f"Error subiendo imagen: {e}")
@@ -102,13 +99,18 @@ def color_deuda(row):
     color = ''
     try:
         if row['Estado_Pago'] == 'Pagado':
-            color = 'background-color: #d4edda; color: #155724;' # Verde
+            color = 'background-color: #d4edda; color: #155724;'
         elif row['Estado_Pago'] == 'Pendiente':
-            vence = row['Fecha'] + timedelta(days=int(row['Dias_Credito'] or 0))
-            dias_rest = (vence.date() - date.today()).days
-            
-            if dias_rest < 0: color = 'background-color: #f8d7da; color: #721c24;' # Rojo (Vencido)
-            elif dias_rest <= 3: color = 'background-color: #fff3cd; color: #856404;' # Amarillo (Alerta)
+            # Cálculo seguro de fechas para el color
+            try:
+                dias = int(row['Dias_Credito']) if pd.notnull(row['Dias_Credito']) else 0
+                vence = row['Fecha'] + timedelta(days=dias)
+                dias_rest = (vence.date() - date.today()).days
+                
+                if dias_rest < 0: color = 'background-color: #f8d7da; color: #721c24;' 
+                elif dias_rest <= 3: color = 'background-color: #fff3cd; color: #856404;' 
+            except:
+                pass
     except: pass
     return [color] * len(row)
 
@@ -117,31 +119,37 @@ st.title("🌱 Agrícola Montserrat - Gestión Global")
 
 df_completo = cargar_datos()
 
-# 🔔 ZONA DE ALERTAS (NUEVO)
+# 🔔 ZONA DE ALERTAS
 if not df_completo.empty:
     hoy = date.today()
     
     # 1. Alerta de Vencimientos
     pendientes = df_completo[df_completo['Estado_Pago'] == 'Pendiente'].copy()
     if not pendientes.empty:
-        pendientes['Vence'] = pendientes['Fecha'].dt.date + pd.to_timedelta(pendientes['Dias_Credito'], unit='D').dt.days
+        # --- CORRECCIÓN AQUÍ: Suma de fechas robusta ---
+        # Aseguramos que Dias_Credito sea número y llenamos vacíos con 0
+        pendientes['Dias_Credito'] = pd.to_numeric(pendientes['Dias_Credito'], errors='coerce').fillna(0)
+        
+        # Sumamos Fecha (Timestamp) + Timedelta (Días) y luego sacamos la fecha (.dt.date)
+        pendientes['Vence'] = (pendientes['Fecha'] + pd.to_timedelta(pendientes['Dias_Credito'], unit='D')).dt.date
+        
+        # Calculamos diferencia contra hoy
         pendientes['Dias_Restantes'] = (pendientes['Vence'] - hoy).apply(lambda x: x.days)
         
-        # Filtramos las que vencen en 3 días o menos (o ya vencieron)
         urgentes = pendientes[pendientes['Dias_Restantes'] <= 3]
         
         if not urgentes.empty:
             st.error(f"🔔 ¡ATENCIÓN! Tienes {len(urgentes)} facturas por cobrar críticas.")
-            with st.expander("Ver Facturas Críticas"):
-                st.dataframe(urgentes[['Fecha', 'Cliente', 'Utilidad', 'Dias_Restantes']].sort_values('Dias_Restantes'))
+            # Mostramos tabla simplificada
+            df_urgentes_show = urgentes[['Cliente', 'Utilidad', 'Dias_Restantes', 'Vence']].sort_values('Dias_Restantes')
+            st.dataframe(df_urgentes_show.style.format({"Utilidad": "${:,.0f}"}), use_container_width=True)
 
-    # 2. Resumen Mensual (Solo aparece los primeros 5 días del mes)
+    # 2. Resumen Mensual (Primeros 5 días del mes)
     if hoy.day <= 5:
         primer_dia_mes_actual = hoy.replace(day=1)
         ultimo_dia_mes_anterior = primer_dia_mes_actual - timedelta(days=1)
         mes_anterior_inicio = ultimo_dia_mes_anterior.replace(day=1)
         
-        # Filtramos datos del mes anterior
         mask_mes = (df_completo['Fecha'].dt.date >= mes_anterior_inicio) & (df_completo['Fecha'].dt.date <= ultimo_dia_mes_anterior)
         df_mes = df_completo.loc[mask_mes]
         
@@ -228,7 +236,6 @@ with tab2:
         if st.form_submit_button("☁️ Guardar Viaje"):
             if prov and cli:
                 with st.spinner("Subiendo archivos y datos..."):
-                    # Subida de archivos
                     url_compra = subir_archivo(fec_file, f"compra_{prov}")
                     url_venta = subir_archivo(fev_file, f"venta_{cli}")
 
@@ -254,7 +261,6 @@ with tab2:
 with tab3:
     st.subheader("Historial de Operaciones")
     if not df.empty:
-        # Configuración especial para que las columnas de links se vean bien
         st.dataframe(
             df.style.apply(color_deuda, axis=1).format({"Utilidad": "${:,.0f}", "Kg_Venta": "{:,.1f}"}), 
             use_container_width=True,
@@ -267,5 +273,6 @@ with tab3:
         )
     else:
         st.write("No hay registros disponibles.")
+
 
 
