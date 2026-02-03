@@ -45,7 +45,7 @@ BUCKET_FACTURAS = "facturas"
 
 # --- 2. FUNCIONES DE LÓGICA ---
 
-# Usamos cache con tiempo corto para velocidad, se borra al editar
+# Cache para velocidad (se limpia al guardar/editar)
 @st.cache_data(ttl=60) 
 def cargar_datos():
     if not supabase: return pd.DataFrame()
@@ -67,11 +67,11 @@ def cargar_datos():
             if 'Fecha' in df.columns:
                 df['Fecha'] = pd.to_datetime(df['Fecha'])
             
-            # Limpieza estricta de URLs para que Streamlit detecte los links
+            # Limpieza estricta de URLs para visualización correcta
             cols_url = ['FEC_Doc', 'FEV_Doc']
             for col in cols_url:
                 if col in df.columns:
-                    # Convertimos vacíos o textos 'None' a objetos None reales
+                    # Reemplazamos textos vacíos o 'None' por objeto None real
                     df[col] = df[col].replace({'': None, 'None': None, 'nan': None})
             
             return df
@@ -118,7 +118,6 @@ def color_deuda(row):
 
 def obtener_opciones(df, col, defaults):
     existentes = df[col].unique().tolist() if not df.empty and col in df.columns else []
-    # Eliminamos duplicados y vacíos
     return sorted(list(set(defaults + [x for x in existentes if x])))
 
 # --- INICIO DE LA INTERFAZ ---
@@ -127,7 +126,6 @@ st.title("🌱 Agrícola Montserrat - Gestión Global")
 # SIDEBAR & FILTROS
 st.sidebar.header("⚙️ Configuración")
 
-# Botón para forzar actualización
 if st.sidebar.button("🔄 Actualizar Datos"):
     st.cache_data.clear()
     st.rerun()
@@ -143,7 +141,7 @@ df_completo = cargar_datos()
 if not df_completo.empty:
     hoy = date.today()
     
-    # 1. Alertas de Cobro
+    # Alerta de Cobros
     if 'Estado_Pago' in df_completo.columns:
         pendientes = df_completo[df_completo['Estado_Pago'] == 'Pendiente'].copy()
         if not pendientes.empty:
@@ -155,7 +153,7 @@ if not df_completo.empty:
             if not urgentes.empty:
                 st.error(f"🔔 ¡ATENCIÓN! Tienes {len(urgentes)} facturas críticas por cobrar.")
 
-    # 2. Resumen Mensual
+    # Resumen Mensual
     if ver_resumen:
         primer = hoy.replace(day=1)
         ultimo_anterior = primer - timedelta(days=1)
@@ -210,9 +208,136 @@ with tab2:
         r1, r2, r3, r4 = st.columns(4)
         fecha_in = r1.date_input("Fecha", date.today())
         
-        # Desplegables con opción de escribir uno nuevo abajo
+        # Selectores Inteligentes (Listas + Opción manual abajo)
         l_prod = obtener_opciones(df_completo, 'Producto', ["Plátano", "Guayabo"])
-        s
+        s_prod = r2.selectbox("Fruta", l_prod)
+        n_prod = r2.text_input("¿Otra fruta?", placeholder="Escribe si no está en lista")
+        
+        l_prov = obtener_opciones(df_completo, 'Proveedor', ["Omar", "Rancho"])
+        s_prov = r3.selectbox("Proveedor", l_prov)
+        n_prov = r3.text_input("¿Otro proveedor?", placeholder="Escribe si no está en lista")
+
+        l_cli = obtener_opciones(df_completo, 'Cliente', ["Calima", "Fogón", "HEFE"])
+        s_cli = r4.selectbox("Cliente", l_cli)
+        n_cli = r4.text_input("¿Otro cliente?", placeholder="Escribe si no está en lista")
+
+        col_c, col_v = st.columns(2)
+        with col_c:
+            kgc = st.number_input("Kg Compra", min_value=0.0)
+            pc = st.number_input("Precio Compra", min_value=0.0)
+            fl = st.number_input("Fletes", min_value=0.0)
+            fec_file = st.file_uploader("Factura Compra (PDF/Foto)")
+        with col_v:
+            kgv = st.number_input("Kg Venta", min_value=0.0)
+            pv = st.number_input("Precio Venta", min_value=0.0)
+            desc = st.number_input("Deducciones", min_value=0.0)
+            fev_file = st.file_uploader("Factura Venta (PDF/Foto)")
+
+        util_est = (kgv * pv) - (kgc * pc) - fl - desc
+        st.metric("💰 Utilidad Estimada", f"${util_est:,.0f}")
+        
+        estado = st.selectbox("Estado", ["Pagado", "Pendiente"])
+        dias = st.number_input("Días Crédito", 8)
+
+        # Botón de envío (Dentro del FORM, correctamente indentado)
+        if st.form_submit_button("☁️ Guardar"):
+            # Lógica: Si escribieron en el cuadro de texto manual, usamos eso. Si no, el dropdown.
+            fin_prod = n_prod if n_prod else s_prod
+            fin_prov = n_prov if n_prov else s_prov
+            fin_cli = n_cli if n_cli else s_cli
+
+            if fin_prov and fin_cli:
+                with st.spinner("Guardando y actualizando..."):
+                    uc = subir_archivo(fec_file, f"compra_{fin_prov}")
+                    uv = subir_archivo(fev_file, f"venta_{fin_cli}")
+                    
+                    data = {
+                        "fecha": str(fecha_in), "producto": fin_prod, "proveedor": fin_prov, "cliente": fin_cli,
+                        "kg_compra": kgc, "precio_compra": pc, "fletes": fl, "viaticos": 0, "otros_gastos": 0,
+                        "kg_venta": kgv, "precio_venta": pv, "retenciones": 0, "descuentos": desc,
+                        "utilidad": util_est, "estado_pago": estado, "dias_credito": dias,
+                        "fec_doc_url": uc if uc else "", "fev_doc_url": uv if uv else ""
+                    }
+                    supabase.table("ventas_2026").insert(data).execute()
+                    st.cache_data.clear() # Limpieza de cache
+                    st.success("✅ ¡Guardado!")
+                    st.rerun()
+            else:
+                st.error("Faltan datos obligatorios (Proveedor o Cliente).")
+
+# --- TAB 3: CARTERA Y EDICIÓN ---
+with tab3:
+    st.subheader("Historial (Selecciona fila para Editar)")
+    if not df.empty:
+        # Configuración de columnas
+        column_cfg = {
+            "FEC_Doc": st.column_config.LinkColumn("F. Compra", display_text="📎 Ver Doc"),
+            "FEV_Doc": st.column_config.LinkColumn("F. Venta", display_text="📎 Ver Doc"),
+            "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
+            "Utilidad": st.column_config.NumberColumn("Utilidad", format="$%d")
+        }
+
+        event = st.dataframe(
+            df.style.apply(color_deuda, axis=1),
+            use_container_width=True,
+            column_config=column_cfg,
+            selection_mode="single-row",
+            on_select="rerun",
+            hide_index=True
+        )
+
+        if event.selection.rows:
+            idx = event.selection.rows[0]
+            row_data = df.iloc[idx]
+            id_row = row_data['ID']
+
+            st.divider()
+            st.markdown(f"### ✏️ Editando: **{row_data['Cliente']}** ({row_data['Fecha'].strftime('%d/%m')})")
+            
+            with st.form("form_edicion"):
+                c1, c2, c3, c4 = st.columns(4)
+                e_kgc = c1.number_input("Kg Compra", value=float(row_data['Kg_Compra']))
+                e_pc = c2.number_input("Precio Compra", value=float(row_data['Precio_Compra']))
+                e_kgv = c3.number_input("Kg Venta", value=float(row_data['Kg_Venta']))
+                e_pv = c4.number_input("Precio Venta", value=float(row_data['Precio_Venta']))
+
+                c5, c6 = st.columns(2)
+                e_est = c5.selectbox("Estado", ["Pagado", "Pendiente"], index=0 if row_data['Estado_Pago'] == "Pagado" else 1)
+                
+                st.caption("Subir archivos (solo si deseas cambiar los actuales):")
+                col_fa, col_fb = st.columns(2)
+                e_file_c = col_fa.file_uploader("Nueva Fac. Compra")
+                e_file_v = col_fb.file_uploader("Nueva Fac. Venta")
+
+                if st.form_submit_button("💾 Guardar Cambios"):
+                    gastos = row_data['Fletes'] + row_data['Descuentos'] + row_data['Viaticos'] + row_data['Otros_Gastos']
+                    new_util = (e_kgv * e_pv) - (e_kgc * e_pc) - gastos
+
+                    updates = {
+                        "kg_compra": e_kgc, "precio_compra": e_pc,
+                        "kg_venta": e_kgv, "precio_venta": e_pv,
+                        "estado_pago": e_est,
+                        "utilidad": new_util
+                    }
+                    
+                    if e_file_c:
+                        updates["fec_doc_url"] = subir_archivo(e_file_c, f"edit_compra_{row_data['Proveedor']}")
+                    if e_file_v:
+                        updates["fev_doc_url"] = subir_archivo(e_file_v, f"edit_venta_{row_data['Cliente']}")
+                    
+                    supabase.table("ventas_2026").update(updates).eq("id", int(id_row)).execute()
+                    st.cache_data.clear() # Limpieza de cache
+                    st.success("✅ Actualizado.")
+                    st.rerun()
+            
+            if st.button("🗑️ Eliminar Registro", type="primary"):
+                supabase.table("ventas_2026").delete().eq("id", int(id_row)).execute()
+                st.cache_data.clear() # Limpieza de cache
+                st.warning("Registro eliminado.")
+                st.rerun()
+    else:
+        st.write("No hay registros.")
+
 
 
 
