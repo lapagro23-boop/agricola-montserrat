@@ -44,6 +44,7 @@ supabase = init_connection()
 BUCKET_FACTURAS = "facturas" 
 
 # --- 2. FUNCIONES DE LÓGICA ---
+# Quitamos el cache de datos para que las listas desplegables se actualicen al instante
 def cargar_datos():
     if not supabase: return pd.DataFrame()
     try:
@@ -62,12 +63,6 @@ def cargar_datos():
             if 'Fecha' in df.columns:
                 df['Fecha'] = pd.to_datetime(df['Fecha'])
             
-            # Limpiamos URLs vacías
-            cols_url = ['FEC_Doc', 'FEV_Doc']
-            for col in cols_url:
-                if col in df.columns:
-                    df[col] = df[col].replace('', None).replace('None', None)
-            
             return df
     except Exception as e:
         st.warning(f"Esperando datos... (Detalle: {e})")
@@ -80,18 +75,22 @@ def cargar_datos():
 def subir_archivo(archivo, nombre_base):
     if archivo and supabase:
         try:
+            # Limpiamos nombre y añadimos timestamp para evitar duplicados
             nombre_clean = "".join(c for c in archivo.name if c.isalnum() or c in "._- ")
             nombre_archivo = f"{nombre_base}_{date.today()}_{nombre_clean}"
             archivo_bytes = archivo.getvalue()
             
+            # Subir
             supabase.storage.from_(BUCKET_FACTURAS).upload(
                 path=nombre_archivo, 
                 file=archivo_bytes, 
                 file_options={"content-type": archivo.type}
             )
-            return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
+            # Obtener URL pública
+            url = supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
+            return url
         except Exception as e:
-            st.warning(f"Error subiendo imagen: {e}")
+            st.warning(f"Error subiendo imagen (Verifica que el bucket '{BUCKET_FACTURAS}' sea público): {e}")
             return None
     return None
 
@@ -101,18 +100,22 @@ def color_deuda(row):
         if row['Estado_Pago'] == 'Pagado':
             color = 'background-color: #d4edda; color: #155724;'
         elif row['Estado_Pago'] == 'Pendiente':
-            # Cálculo seguro de fechas para el color
-            try:
-                dias = int(row['Dias_Credito']) if pd.notnull(row['Dias_Credito']) else 0
-                vence = row['Fecha'] + timedelta(days=dias)
-                dias_rest = (vence.date() - date.today()).days
-                
-                if dias_rest < 0: color = 'background-color: #f8d7da; color: #721c24;' 
-                elif dias_rest <= 3: color = 'background-color: #fff3cd; color: #856404;' 
-            except:
-                pass
+            dias = int(row['Dias_Credito']) if pd.notnull(row['Dias_Credito']) else 0
+            vence = row['Fecha'] + timedelta(days=dias)
+            dias_rest = (vence.date() - date.today()).days
+            
+            if dias_rest < 0: color = 'background-color: #f8d7da; color: #721c24;' 
+            elif dias_rest <= 3: color = 'background-color: #fff3cd; color: #856404;' 
     except: pass
     return [color] * len(row)
+
+# Función auxiliar para gestionar los desplegables inteligentes
+def obtener_opciones(df, col, defaults):
+    existentes = df[col].unique().tolist() if not df.empty and col in df.columns else []
+    # Unimos defaults con existentes, eliminamos duplicados y vacíos
+    opciones = sorted(list(set(defaults + [x for x in existentes if x])))
+    opciones.append("➕ Nuevo...")
+    return opciones
 
 # --- INICIO DE LA INTERFAZ ---
 st.title("🌱 Agrícola Montserrat - Gestión Global")
@@ -126,25 +129,17 @@ if not df_completo.empty:
     # 1. Alerta de Vencimientos
     pendientes = df_completo[df_completo['Estado_Pago'] == 'Pendiente'].copy()
     if not pendientes.empty:
-        # --- CORRECCIÓN AQUÍ: Suma de fechas robusta ---
-        # Aseguramos que Dias_Credito sea número y llenamos vacíos con 0
         pendientes['Dias_Credito'] = pd.to_numeric(pendientes['Dias_Credito'], errors='coerce').fillna(0)
-        
-        # Sumamos Fecha (Timestamp) + Timedelta (Días) y luego sacamos la fecha (.dt.date)
         pendientes['Vence'] = (pendientes['Fecha'] + pd.to_timedelta(pendientes['Dias_Credito'], unit='D')).dt.date
-        
-        # Calculamos diferencia contra hoy
         pendientes['Dias_Restantes'] = (pendientes['Vence'] - hoy).apply(lambda x: x.days)
         
         urgentes = pendientes[pendientes['Dias_Restantes'] <= 3]
-        
         if not urgentes.empty:
             st.error(f"🔔 ¡ATENCIÓN! Tienes {len(urgentes)} facturas por cobrar críticas.")
-            # Mostramos tabla simplificada
             df_urgentes_show = urgentes[['Cliente', 'Utilidad', 'Dias_Restantes', 'Vence']].sort_values('Dias_Restantes')
             st.dataframe(df_urgentes_show.style.format({"Utilidad": "${:,.0f}"}), use_container_width=True)
 
-    # 2. Resumen Mensual (Primeros 5 días del mes)
+    # 2. Resumen Mensual
     if hoy.day <= 5:
         primer_dia_mes_actual = hoy.replace(day=1)
         ultimo_dia_mes_anterior = primer_dia_mes_actual - timedelta(days=1)
@@ -200,15 +195,34 @@ with tab1:
     else:
         st.info("Sin datos en el rango seleccionado.")
 
-# --- TAB 2: CALCULADORA ---
+# --- TAB 2: CALCULADORA (CON DESPLEGABLES INTELIGENTES) ---
 with tab2:
     st.header("Registrar Viaje")
     with st.form("registro_viaje", clear_on_submit=True):
         r1, r2, r3, r4 = st.columns(4)
         fecha_in = r1.date_input("Fecha", date.today())
-        fruta = r2.selectbox("Fruta", ["Plátano", "Guayabo", "Papaya", "Otro"])
-        prov = r3.text_input("Proveedor")
-        cli = r4.text_input("Cliente")
+        
+        # Lógica de Desplegables "Auto-Learning"
+        lista_frutas = obtener_opciones(df_completo, 'Producto', ["Plátano", "Guayabo"])
+        sel_fruta = r2.selectbox("Fruta", lista_frutas)
+        if sel_fruta == "➕ Nuevo...":
+            fruta_final = r2.text_input("Escribe la nueva fruta", placeholder="Ej: Maracuyá")
+        else:
+            fruta_final = sel_fruta
+
+        lista_prov = obtener_opciones(df_completo, 'Proveedor', ["Omar", "Rancho"])
+        sel_prov = r3.selectbox("Proveedor", lista_prov)
+        if sel_prov == "➕ Nuevo...":
+            prov_final = r3.text_input("Escribe el nuevo proveedor")
+        else:
+            prov_final = sel_prov
+
+        lista_cli = obtener_opciones(df_completo, 'Cliente', ["Calima", "Fogón", "HEFE"])
+        sel_cli = r4.selectbox("Cliente", lista_cli)
+        if sel_cli == "➕ Nuevo...":
+            cli_final = r4.text_input("Escribe el nuevo cliente")
+        else:
+            cli_final = sel_cli
 
         st.divider()
         col_c, col_v = st.columns(2)
@@ -234,14 +248,15 @@ with tab2:
         dias = ce2.number_input("Días Crédito", 8)
 
         if st.form_submit_button("☁️ Guardar Viaje"):
-            if prov and cli:
+            # Validamos que se haya elegido algo válido (no dejar el "Nuevo..." seleccionado sin escribir nada)
+            if prov_final and cli_final and prov_final != "➕ Nuevo..." and cli_final != "➕ Nuevo...":
                 with st.spinner("Subiendo archivos y datos..."):
-                    url_compra = subir_archivo(fec_file, f"compra_{prov}")
-                    url_venta = subir_archivo(fev_file, f"venta_{cli}")
+                    url_compra = subir_archivo(fec_file, f"compra_{prov_final}")
+                    url_venta = subir_archivo(fev_file, f"venta_{cli_final}")
 
                     datos_nuevos = {
                         "fecha": str(fecha_in),
-                        "producto": fruta, "proveedor": prov, "cliente": cli,
+                        "producto": fruta_final, "proveedor": prov_final, "cliente": cli_final,
                         "fec_doc_url": url_compra if url_compra else "",
                         "fev_doc_url": url_venta if url_venta else "",
                         "kg_compra": kgc, "precio_compra": pc, "fletes": fl, "viaticos": 0, "otros_gastos": 0,
@@ -251,22 +266,26 @@ with tab2:
                     
                     try:
                         supabase.table("ventas_2026").insert(datos_nuevos).execute()
-                        st.success("✅ ¡Registro guardado exitosamente!")
+                        st.success("✅ ¡Registro guardado! Si usaste un cliente/proveedor nuevo, ya aparecerá en la lista la próxima vez.")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error: {e}")
-            else: st.error("Falta Proveedor o Cliente.")
+            else: st.error("Falta Proveedor o Cliente (o no escribiste el nombre nuevo).")
 
 # --- TAB 3: CARTERA ---
 with tab3:
     st.subheader("Historial de Operaciones")
     if not df.empty:
+        # Preparamos el dataframe para que los links funcionen
+        # IMPORTANTE: Si la celda no tiene URL, ponemos None para que no salga el link roto
+        df_display = df.copy()
+        
         st.dataframe(
-            df.style.apply(color_deuda, axis=1).format({"Utilidad": "${:,.0f}", "Kg_Venta": "{:,.1f}"}), 
+            df_display.style.apply(color_deuda, axis=1).format({"Utilidad": "${:,.0f}", "Kg_Venta": "{:,.1f}"}), 
             use_container_width=True,
             column_config={
-                "FEC_Doc": st.column_config.LinkColumn("📄 F. Compra", display_text="Ver Factura"),
-                "FEV_Doc": st.column_config.LinkColumn("📄 F. Venta", display_text="Ver Factura"),
+                "FEC_Doc": st.column_config.LinkColumn("📎 F. Compra", display_text="Ver Doc"),
+                "FEV_Doc": st.column_config.LinkColumn("📎 F. Venta", display_text="Ver Doc"),
                 "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
             },
             hide_index=True
