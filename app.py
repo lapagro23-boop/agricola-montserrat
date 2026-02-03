@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
 from datetime import date, timedelta, datetime
-from supabase import create_client, Client
+from supabase import create_client
 import io
 
 # --- 1. CONFIGURACIÓN INICIAL ---
@@ -64,14 +63,15 @@ def cargar_datos():
             if 'Fecha' in df.columns:
                 df['Fecha'] = pd.to_datetime(df['Fecha'])
             
-            # Limpieza de URLs para evitar links rotos
+            # --- CORRECCIÓN CRÍTICA DE ARCHIVOS ---
+            # Aseguramos que los campos de URL sean reconocidos correctamente
             cols_url = ['FEC_Doc', 'FEV_Doc']
             for col in cols_url:
                 if col in df.columns:
-                    # Convertimos a string y si no parece un link (http), lo borramos
-                    df[col] = df[col].astype(str)
-                    mask_invalid = ~df[col].str.startswith("http")
-                    df.loc[mask_invalid, col] = None
+                    # Convertimos nulos a None real de Python
+                    df[col] = df[col].where(pd.notnull(df[col]), None)
+                    # Si la celda está vacía string "", pon None
+                    df[col] = df[col].replace('', None)
             
             return df
     except Exception as e:
@@ -82,18 +82,24 @@ def cargar_datos():
 def subir_archivo(archivo, nombre_base):
     if archivo and supabase:
         try:
+            # Nombre único con fecha y hora para evitar sobrescribir
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             nombre_clean = "".join(c for c in archivo.name if c.isalnum() or c in "._- ")
-            nombre_archivo = f"{nombre_base}_{datetime.now().strftime('%H%M%S')}_{nombre_clean}"
+            nombre_archivo = f"{nombre_base}_{timestamp}_{nombre_clean}"
             archivo_bytes = archivo.getvalue()
             
+            # 1. Subir al Bucket
             supabase.storage.from_(BUCKET_FACTURAS).upload(
                 path=nombre_archivo, 
                 file=archivo_bytes, 
                 file_options={"content-type": archivo.type}
             )
-            return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
+            
+            # 2. Obtener URL Pública
+            url = supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
+            return url
         except Exception as e:
-            st.warning(f"Error subiendo: {e}")
+            st.error(f"Error subiendo archivo: {e}")
             return None
     return None
 
@@ -114,8 +120,8 @@ def color_deuda(row):
 
 def obtener_opciones(df, col, defaults):
     existentes = df[col].unique().tolist() if not df.empty and col in df.columns else []
+    # Eliminamos duplicados y vacíos
     lista_final = sorted(list(set(defaults + [x for x in existentes if x])))
-    lista_final.append("➕ Nuevo...")
     return lista_final
 
 # --- INICIO DE LA INTERFAZ ---
@@ -136,16 +142,6 @@ if not df_completo.empty:
             urgentes = pendientes[pendientes['Dias_Restantes'] <= 3]
             if not urgentes.empty:
                 st.error(f"🔔 ¡ATENCIÓN! {len(urgentes)} facturas críticas.")
-
-    if hoy.day <= 5:
-        primer = hoy.replace(day=1)
-        ultimo_anterior = primer - timedelta(days=1)
-        inicio_anterior = ultimo_anterior.replace(day=1)
-        
-        mask = (df_completo['Fecha'].dt.date >= inicio_anterior) & (df_completo['Fecha'].dt.date <= ultimo_anterior)
-        df_mes = df_completo.loc[mask]
-        if not df_mes.empty:
-            st.info(f"📅 Resumen {ultimo_anterior.strftime('%B')}: Ventas ${df_mes['Utilidad'].sum():,.0f} | {df_mes['Kg_Venta'].sum():,.0f} Kg")
 
 # SIDEBAR
 st.sidebar.header("⚙️ Filtros")
@@ -173,6 +169,8 @@ with tab1:
         c3.metric("⚖️ Merma", f"{abs(merma):,.1f} Kg", delta_color="inverse")
         c4.metric("📈 Ganancia", f"{ganancia:,.1f} Kg")
         
+        # Gráfico simple
+        import plotly.express as px
         st.plotly_chart(px.bar(df, x='Proveedor', y='Utilidad', color='Producto', title="Utilidad por Proveedor"), use_container_width=True)
     else:
         st.info("No hay datos.")
@@ -184,17 +182,21 @@ with tab2:
         r1, r2, r3, r4 = st.columns(4)
         fecha_in = r1.date_input("Fecha", date.today())
         
+        # --- LÓGICA DE SELECCIÓN SIMPLIFICADA (Sin Nuevo+) ---
+        # 1. Fruta
         l_prod = obtener_opciones(df_completo, 'Producto', ["Plátano", "Guayabo"])
         s_prod = r2.selectbox("Fruta", l_prod)
-        t_prod = r2.text_input("Nombre Nueva Fruta") if s_prod == "➕ Nuevo..." else ""
-
+        n_prod = r2.text_input("¿Otra fruta?", placeholder="Escribe aquí si no está en lista")
+        
+        # 2. Proveedor
         l_prov = obtener_opciones(df_completo, 'Proveedor', ["Omar", "Rancho"])
         s_prov = r3.selectbox("Proveedor", l_prov)
-        t_prov = r3.text_input("Nombre Nuevo Prov.") if s_prov == "➕ Nuevo..." else ""
+        n_prov = r3.text_input("¿Otro proveedor?", placeholder="Escribe aquí si no está en lista")
 
+        # 3. Cliente (Ya corregido sin Fogón del Mar duplicado)
         l_cli = obtener_opciones(df_completo, 'Cliente', ["Calima", "Fogón", "HEFE"])
         s_cli = r4.selectbox("Cliente", l_cli)
-        t_cli = r4.text_input("Nombre Nuevo Cli.") if s_cli == "➕ Nuevo..." else ""
+        n_cli = r4.text_input("¿Otro cliente?", placeholder="Escribe aquí si no está en lista")
 
         col_c, col_v = st.columns(2)
         with col_c:
@@ -215,9 +217,10 @@ with tab2:
         dias = st.number_input("Días Crédito", 8)
 
         if st.form_submit_button("☁️ Guardar"):
-            fin_prod = t_prod if s_prod == "➕ Nuevo..." else s_prod
-            fin_prov = t_prov if s_prov == "➕ Nuevo..." else s_prov
-            fin_cli = t_cli if s_cli == "➕ Nuevo..." else s_cli
+            # Si escribieron en el cuadro de texto, usamos eso. Si no, usamos el dropdown.
+            fin_prod = n_prod if n_prod else s_prod
+            fin_prov = n_prov if n_prov else s_prov
+            fin_cli = n_cli if n_cli else s_cli
 
             if fin_prov and fin_cli:
                 with st.spinner("Guardando..."):
@@ -246,8 +249,8 @@ with tab3:
             df.style.apply(color_deuda, axis=1).format({"Utilidad": "${:,.0f}"}),
             use_container_width=True,
             column_config={
-                "FEC_Doc": st.column_config.LinkColumn("F. Compra", display_text="📎 Ver"),
-                "FEV_Doc": st.column_config.LinkColumn("F. Venta", display_text="📎 Ver"),
+                "FEC_Doc": st.column_config.LinkColumn("F. Compra", display_text="📎 Ver Doc"),
+                "FEV_Doc": st.column_config.LinkColumn("F. Venta", display_text="📎 Ver Doc"),
                 "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
             },
             selection_mode="single-row",
@@ -265,13 +268,13 @@ with tab3:
             st.markdown(f"### ✏️ Editando: {row_data['Producto']} ({row_data['Fecha'].date()})")
             
             with st.form("form_edicion"):
-                # BLOQUE 1: DATOS DE COMPRA (Ahora editables)
+                # BLOQUE 1: DATOS DE COMPRA
                 st.markdown("**1. Datos de Compra**")
                 c1, c2 = st.columns(2)
                 e_kgc = c1.number_input("Kg Compra", value=float(row_data['Kg_Compra']))
                 e_pc = c2.number_input("Precio Compra", value=float(row_data['Precio_Compra']))
                 
-                # BLOQUE 2: DATOS DE VENTA (Editables)
+                # BLOQUE 2: DATOS DE VENTA
                 st.markdown("**2. Datos de Venta**")
                 c3, c4 = st.columns(2)
                 e_kgv = c3.number_input("Kg Venta", value=float(row_data['Kg_Venta']))
@@ -282,13 +285,12 @@ with tab3:
                 c5, c6 = st.columns(2)
                 e_est = c5.selectbox("Estado", ["Pagado", "Pendiente"], index=0 if row_data['Estado_Pago'] == "Pagado" else 1)
                 
-                st.caption("Subir nuevos archivos solo si deseas reemplazar los actuales:")
+                st.caption("Subir nuevos archivos solo si deseas reemplazar:")
                 col_fa, col_fb = st.columns(2)
                 e_file_c = col_fa.file_uploader("Reemplazar Fac. Compra")
                 e_file_v = col_fb.file_uploader("Reemplazar Fac. Venta")
 
                 if st.form_submit_button("💾 Actualizar Registro Completo"):
-                    # Cálculo automático de nueva utilidad
                     gastos_fijos = row_data['Fletes'] + row_data['Descuentos'] + row_data['Viaticos'] + row_data['Otros_Gastos']
                     nueva_utilidad = (e_kgv * e_pv) - (e_kgc * e_pc) - gastos_fijos
 
@@ -308,16 +310,17 @@ with tab3:
                     st.success("Registro actualizado exitosamente.")
                     st.rerun()
             
-            # BOTÓN DE ELIMINAR (Fuera del form para evitar conflictos)
+            # BOTÓN DE ELIMINAR
             st.divider()
             col_del, _ = st.columns([1, 4])
-            if col_del.button("🗑️ Eliminar Registro", type="primary", help="Esta acción no se puede deshacer"):
+            if col_del.button("🗑️ Eliminar Registro", type="primary"):
                 supabase.table("ventas_2026").delete().eq("id", int(id_row)).execute()
-                st.error("Registro eliminado permanentemente.")
+                st.error("Registro eliminado.")
                 st.rerun()
 
     else:
         st.write("No hay datos para mostrar.")
+
 
 
 
