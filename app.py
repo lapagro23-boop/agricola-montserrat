@@ -38,7 +38,7 @@ st.markdown("""
         font-weight: bold;
     }
 
-    /* Botones principales (Guardar/Actualizar) */
+    /* Botones principales */
     .stButton>button {
         background-color: #2e7d32;
         color: white;
@@ -349,15 +349,18 @@ with tab2:
         
         l_prod = obtener_opciones(df_ventas, 'Producto', ["Plátano", "Guayabo"])
         s_prod = r2.selectbox("Fruta", l_prod)
-        n_prod = r2.text_input("Otra", placeholder="Si no está en lista")
+        # --- CORRECCIÓN AQUÍ: NOMBRES ÚNICOS PARA EVITAR ERROR ---
+        n_prod = r2.text_input("¿Otra fruta?", placeholder="Si no está en lista")
         
         l_prov = obtener_opciones(df_ventas, 'Proveedor', ["Omar", "Rancho"])
         s_prov = r3.selectbox("Proveedor", l_prov)
-        n_prov = r3.text_input("Otro", placeholder="Si no está en lista")
+        # --- CORRECCIÓN AQUÍ ---
+        n_prov = r3.text_input("¿Otro proveedor?", placeholder="Si no está en lista")
 
         l_cli = obtener_opciones(df_ventas, 'Cliente', ["Calima", "Fogón", "HEFE"])
         s_cli = r4.selectbox("Cliente", l_cli)
-        n_cli = r4.text_input("Otro", placeholder="Si no está en lista")
+        # --- CORRECCIÓN AQUÍ ---
+        n_cli = r4.text_input("¿Otro cliente?", placeholder="Si no está en lista")
 
         c_c, c_v = st.columns(2)
         with c_c:
@@ -439,6 +442,7 @@ with tab3:
                 supabase.table("ventas_2026").delete().eq("id", int(row['ID'])).execute()
                 st.cache_data.clear()
                 st.rerun()
+
 
 
 
