@@ -45,7 +45,6 @@ BUCKET_FACTURAS = "facturas"
 
 # --- 2. FUNCIONES DE LÓGICA ---
 
-# Cache para velocidad (se limpia al guardar/editar)
 @st.cache_data(ttl=60) 
 def cargar_datos():
     if not supabase: return pd.DataFrame()
@@ -67,11 +66,10 @@ def cargar_datos():
             if 'Fecha' in df.columns:
                 df['Fecha'] = pd.to_datetime(df['Fecha'])
             
-            # Limpieza estricta de URLs para visualización correcta
+            # Limpieza de URLs
             cols_url = ['FEC_Doc', 'FEV_Doc']
             for col in cols_url:
                 if col in df.columns:
-                    # Reemplazamos textos vacíos o 'None' por objeto None real
                     df[col] = df[col].replace({'': None, 'None': None, 'nan': None})
             
             return df
@@ -120,22 +118,42 @@ def obtener_opciones(df, col, defaults):
     existentes = df[col].unique().tolist() if not df.empty and col in df.columns else []
     return sorted(list(set(defaults + [x for x in existentes if x])))
 
+# Función para convertir DF a CSV para descargar
+@st.cache_data
+def convertir_df_a_csv(df):
+    return df.to_csv(index=False).encode('utf-8')
+
 # --- INICIO DE LA INTERFAZ ---
 st.title("🌱 Agrícola Montserrat - Gestión Global")
 
 # SIDEBAR & FILTROS
 st.sidebar.header("⚙️ Configuración")
 
+# 1. Botón Actualizar
 if st.sidebar.button("🔄 Actualizar Datos"):
     st.cache_data.clear()
     st.rerun()
 
-ver_resumen = st.sidebar.checkbox("👁️ Ver Resumen Mensual", value=(date.today().day <= 5))
 st.sidebar.divider()
 f_ini = st.sidebar.date_input("Inicio", date(2026, 1, 1))
 f_fin = st.sidebar.date_input("Fin", date(2026, 12, 31))
 
+# Carga de datos
 df_completo = cargar_datos()
+
+# 2. Botón Descargar (NUEVO)
+if not df_completo.empty:
+    st.sidebar.divider()
+    st.sidebar.subheader("📂 Contabilidad")
+    csv = convertir_df_a_csv(df_completo)
+    st.sidebar.download_button(
+        label="📥 Descargar Reporte (CSV)",
+        data=csv,
+        file_name=f"Reporte_Agricola_{date.today()}.csv",
+        mime="text/csv",
+    )
+
+ver_resumen = st.sidebar.checkbox("👁️ Ver Resumen Mensual", value=(date.today().day <= 5))
 
 # 🔔 ZONA DE ALERTAS Y RESUMEN
 if not df_completo.empty:
@@ -208,7 +226,6 @@ with tab2:
         r1, r2, r3, r4 = st.columns(4)
         fecha_in = r1.date_input("Fecha", date.today())
         
-        # Selectores Inteligentes (Listas + Opción manual abajo)
         l_prod = obtener_opciones(df_completo, 'Producto', ["Plátano", "Guayabo"])
         s_prod = r2.selectbox("Fruta", l_prod)
         n_prod = r2.text_input("¿Otra fruta?", placeholder="Escribe si no está en lista")
@@ -239,15 +256,13 @@ with tab2:
         estado = st.selectbox("Estado", ["Pagado", "Pendiente"])
         dias = st.number_input("Días Crédito", 8)
 
-        # Botón de envío (Dentro del FORM, correctamente indentado)
         if st.form_submit_button("☁️ Guardar"):
-            # Lógica: Si escribieron en el cuadro de texto manual, usamos eso. Si no, el dropdown.
             fin_prod = n_prod if n_prod else s_prod
             fin_prov = n_prov if n_prov else s_prov
             fin_cli = n_cli if n_cli else s_cli
 
             if fin_prov and fin_cli:
-                with st.spinner("Guardando y actualizando..."):
+                with st.spinner("Guardando..."):
                     uc = subir_archivo(fec_file, f"compra_{fin_prov}")
                     uv = subir_archivo(fev_file, f"venta_{fin_cli}")
                     
@@ -259,17 +274,16 @@ with tab2:
                         "fec_doc_url": uc if uc else "", "fev_doc_url": uv if uv else ""
                     }
                     supabase.table("ventas_2026").insert(data).execute()
-                    st.cache_data.clear() # Limpieza de cache
+                    st.cache_data.clear()
                     st.success("✅ ¡Guardado!")
                     st.rerun()
             else:
-                st.error("Faltan datos obligatorios (Proveedor o Cliente).")
+                st.error("Faltan datos obligatorios.")
 
 # --- TAB 3: CARTERA Y EDICIÓN ---
 with tab3:
     st.subheader("Historial (Selecciona fila para Editar)")
     if not df.empty:
-        # Configuración de columnas
         column_cfg = {
             "FEC_Doc": st.column_config.LinkColumn("F. Compra", display_text="📎 Ver Doc"),
             "FEV_Doc": st.column_config.LinkColumn("F. Venta", display_text="📎 Ver Doc"),
@@ -326,13 +340,13 @@ with tab3:
                         updates["fev_doc_url"] = subir_archivo(e_file_v, f"edit_venta_{row_data['Cliente']}")
                     
                     supabase.table("ventas_2026").update(updates).eq("id", int(id_row)).execute()
-                    st.cache_data.clear() # Limpieza de cache
+                    st.cache_data.clear()
                     st.success("✅ Actualizado.")
                     st.rerun()
             
             if st.button("🗑️ Eliminar Registro", type="primary"):
                 supabase.table("ventas_2026").delete().eq("id", int(id_row)).execute()
-                st.cache_data.clear() # Limpieza de cache
+                st.cache_data.clear()
                 st.warning("Registro eliminado.")
                 st.rerun()
     else:
