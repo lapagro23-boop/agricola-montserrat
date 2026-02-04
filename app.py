@@ -7,7 +7,7 @@ import io
 import re
 import unicodedata
 
-# --- 1. CONFIGURACIÓN E INYECCIÓN CSS ---
+# --- 1. CONFIGURACIÓN ---
 st.set_page_config(page_title="Agrícola Montserrat", layout="wide", page_icon="🍌")
 
 st.markdown("""
@@ -19,7 +19,6 @@ st.markdown("""
         padding: 15px; border-radius: 10px;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.05); text-align: center;
     }
-    div[data-testid="stMetricLabel"] { color: #388e3c; font-weight: bold; }
     .stButton>button {
         background-color: #2e7d32; color: white; border-radius: 8px; border: none;
         padding: 10px 20px; font-weight: bold;
@@ -41,7 +40,7 @@ if not st.session_state.get("password_correct", False):
     st.text_input("Ingresa la clave maestra:", type="password", key="password_input", on_change=check_password)
     st.stop()
 
-# --- CONEXIÓN SUPABASE ---
+# --- CONEXIÓN ---
 try:
     supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
     BUCKET_FACTURAS = "facturas"
@@ -50,7 +49,6 @@ except:
     st.stop()
 
 # --- FUNCIONES ---
-
 def limpiar_nombre(nombre):
     nombre = unicodedata.normalize('NFKD', nombre).encode('ASCII', 'ignore').decode('utf-8')
     nombre = nombre.replace(" ", "_")
@@ -84,20 +82,21 @@ def cargar_datos():
             }
             df_v = df_v.rename(columns={k: v for k, v in cols.items() if k in df_v.columns})
             df_v['Fecha'] = pd.to_datetime(df_v['Fecha'])
-            # Asegurar columnas numéricas
             for c in ['Kg_Compra','Precio_Compra','Fletes','Kg_Venta','Precio_Venta','Descuentos','Utilidad','Precio_Plaza']:
                 if c in df_v.columns: df_v[c] = pd.to_numeric(df_v[c]).fillna(0.0)
     except: pass
 
-    # 2. Gastos
+    # 2. Movimientos Caja (Antiguos Gastos)
     df_g = pd.DataFrame()
     try:
         res_g = supabase.table("gastos_fijos_2026").select("*").order("fecha", desc=True).execute()
         df_g = pd.DataFrame(res_g.data)
         if not df_g.empty:
-            df_g = df_g.rename(columns={'id': 'ID', 'fecha': 'Fecha', 'concepto': 'Concepto', 'monto': 'Monto'})
+            # Ahora traemos 'tipo' también
+            df_g = df_g.rename(columns={'id': 'ID', 'fecha': 'Fecha', 'concepto': 'Concepto', 'monto': 'Monto', 'tipo': 'Tipo'})
             df_g['Fecha'] = pd.to_datetime(df_g['Fecha'])
             df_g['Monto'] = pd.to_numeric(df_g['Monto']).fillna(0.0)
+            if 'Tipo' not in df_g.columns: df_g['Tipo'] = 'Gasto' # Default para datos viejos
     except: pass
 
     # 3. Saldo Inicial
@@ -130,7 +129,6 @@ st.markdown("# 🍌 Agrícola Montserrat")
 st.markdown("### _Sistema de Gestión Integral 2026_")
 st.divider()
 
-# SIDEBAR
 st.sidebar.title("Menú")
 if st.sidebar.button("🔄 Actualizar Datos"):
     st.cache_data.clear()
@@ -140,38 +138,57 @@ st.sidebar.divider()
 f_ini = st.sidebar.date_input("📅 Inicio", date(2026, 1, 1))
 f_fin = st.sidebar.date_input("📅 Fin", date(2026, 12, 31))
 
-# CARGA DE DATOS
+# CARGA DATOS
 df_v, df_g, saldo_inicial = cargar_datos()
 
-# LOGICA CAJA
+# --- LÓGICA FINANCIERA ---
 ingresos_caja = 0
 egresos_caja = 0
+gastos_operativos_total = 0
+
 if not df_v.empty:
+    # 1. Operación Fruta
     ventas_pagadas = df_v[df_v['Estado_Pago'] == 'Pagado']
-    ingresos_caja = (ventas_pagadas['Kg_Venta'] * ventas_pagadas['Precio_Venta']).sum()
+    ingresos_caja += (ventas_pagadas['Kg_Venta'] * ventas_pagadas['Precio_Venta']).sum()
+    
     compras_total = (df_v['Kg_Compra'] * df_v['Precio_Compra']).sum()
     fletes_total = df_v['Fletes'].sum()
     egresos_caja += compras_total + fletes_total
+
 if not df_g.empty:
-    egresos_caja += df_g['Monto'].sum()
+    # 2. Movimientos Extra
+    # Gasto: Resta Caja, Resta Utilidad
+    gastos = df_g[df_g['Tipo'] == 'Gasto']
+    gastos_val = gastos['Monto'].sum()
+    egresos_caja += gastos_val
+    gastos_operativos_total = gastos_val
+
+    # Préstamo Salida: Resta Caja, NO afecta Utilidad
+    prestamos_out = df_g[df_g['Tipo'] == 'Préstamo Salida']
+    egresos_caja += prestamos_out['Monto'].sum()
+
+    # Ingreso Extra: Suma Caja, NO afecta Utilidad Operativa (o podríamos separarlo)
+    ingresos_in = df_g[df_g['Tipo'] == 'Ingreso Extra']
+    ingresos_caja += ingresos_in['Monto'].sum()
+
 flujo_acumulado = ingresos_caja - egresos_caja
 caja_sistema = saldo_inicial + flujo_acumulado
 
-# CONFIG CAJA
+# CALIBRACIÓN
 st.sidebar.divider()
 st.sidebar.subheader("💰 Calibrar Caja")
 with st.sidebar.form("config_caja"):
-    st.caption(f"El sistema calcula: ${caja_sistema:,.0f}")
-    valor_real_usuario = st.number_input("¿Cuánto tienes REALMENTE hoy?", value=float(caja_sistema), format="%.2f")
-    if st.form_submit_button("✅ Ajustar a Realidad"):
-        nueva_base = valor_real_usuario - flujo_acumulado
+    st.caption(f"Sistema: ${caja_sistema:,.0f}")
+    valor_real = st.number_input("Realidad HOY:", value=float(caja_sistema), format="%.2f")
+    if st.form_submit_button("✅ Ajustar"):
+        nueva_base = valor_real - flujo_acumulado
         supabase.table("configuracion_caja").update({"saldo_inicial": nueva_base}).gt("id", 0).execute()
         st.cache_data.clear()
         st.rerun()
 
 # FILTROS
 df_vf = df_v[(df_v['Fecha'].dt.date >= f_ini) & (df_v['Fecha'].dt.date <= f_fin)].copy() if not df_v.empty else pd.DataFrame()
-df_gf = df_g[(df_g['Fecha'].dt.date >= f_ini) & (df_g['Fecha'].dt.date <= f_fin)].copy() if not df_g.empty else pd.DataFrame(columns=['ID','Fecha','Concepto','Monto'])
+df_gf = df_g[(df_g['Fecha'].dt.date >= f_ini) & (df_g['Fecha'].dt.date <= f_fin)].copy() if not df_g.empty else pd.DataFrame(columns=['ID','Fecha','Concepto','Monto','Tipo'])
 
 # ALERTAS
 if not df_v.empty:
@@ -185,20 +202,26 @@ if not df_v.empty:
         if not urg.empty: st.error(f"🔔 Tienes {len(urg)} facturas críticas por cobrar.")
 
 # PESTAÑAS
-t1, t_ana, t_gas, t2, t3 = st.tabs(["📊 Dashboard", "📈 Analítica", "💸 Gastos", "🧮 Nueva Op.", "🚦 Cartera (Editar)"])
+t1, t_ana, t_mov, t2, t3 = st.tabs(["📊 Dashboard", "📈 Analítica", "💸 Movimientos (Caja)", "🧮 Nueva Op.", "🚦 Cartera"])
 
 # --- DASHBOARD ---
 with t1:
     st.subheader("Estado Financiero")
-    ub = df_vf['Utilidad'].sum() if not df_vf.empty else 0
+    # Utilidad = (Ventas - Compras - Fletes) - GASTOS OPERATIVOS (No préstamos)
+    util_bruta_viajes = df_vf['Utilidad'].sum() if not df_vf.empty else 0
+    
+    # Filtramos gastos operativos del rango de fechas
+    gastos_per = df_gf[df_gf['Tipo'] == 'Gasto']['Monto'].sum() if not df_gf.empty else 0
+    
+    util_neta = util_bruta_viajes - gastos_per
     vol = df_vf['Kg_Venta'].sum() if not df_vf.empty else 0
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("💰 CAJA REAL (DISPONIBLE)", f"${caja_sistema:,.0f}", delta="Efectivo en mano")
-    c2.metric("Utilidad Periodo", f"${ub:,.0f}", delta="Rentabilidad")
-    c3.metric("Volumen Movido", f"{vol:,.1f} Kg")
+    c1.metric("💰 CAJA REAL", f"${caja_sistema:,.0f}", delta="Efectivo Disponible")
+    c2.metric("Utilidad Neta", f"${util_neta:,.0f}", delta="Ganancia Real (Sin gastos)")
+    c3.metric("Volumen", f"{vol:,.1f} Kg")
     
-    st.info(f"💡 **Flujo:** Cobros (${ingresos_caja:,.0f}) - Pagos/Gastos (${egresos_caja:,.0f}) + Base Ajustada")
+    st.info("ℹ️ **Nota:** Los 'Préstamos' afectan la Caja pero NO reducen tu Utilidad Neta.")
 
 # --- ANALÍTICA ---
 with t_ana:
@@ -215,22 +238,37 @@ with t_ana:
                 ahorro = df_p['Precio_Plaza'].mean() - df_p['Precio_Compra'].mean()
                 st.metric("Margen vs Plaza", f"${ahorro:,.0f}", delta="Ahorro/Kg" if ahorro>0 else "Sobrecosto")
 
-# --- GASTOS ---
-with t_gas:
-    with st.form("add_gasto", clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        fg = c1.date_input("Fecha", date.today())
-        cg = c2.text_input("Concepto")
-        mg = c3.number_input("Valor", min_value=0.0, format="%.2f")
-        if st.form_submit_button("Registrar Gasto"):
-            if cg and mg > 0:
-                supabase.table("gastos_fijos_2026").insert({"fecha": str(fg), "concepto": cg, "monto": mg}).execute()
+# --- MOVIMIENTOS CAJA ---
+with t_mov:
+    st.subheader("💸 Registro de Movimientos")
+    with st.form("add_mov", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns(4)
+        fm = c1.date_input("Fecha", date.today())
+        cm = c2.text_input("Concepto / Comentario")
+        tm = c3.selectbox("Tipo", ["Gasto (Gasolina/Nómina)", "Préstamo Salida (Prestar)", "Ingreso Extra (Devolución/Aporte)"])
+        mm = c4.number_input("Valor ($)", min_value=0.0, format="%.2f")
+        
+        if st.form_submit_button("Registrar"):
+            tipo_db = "Gasto"
+            if "Préstamo" in tm: tipo_db = "Préstamo Salida"
+            elif "Ingreso" in tm: tipo_db = "Ingreso Extra"
+            
+            if cm and mm > 0:
+                supabase.table("gastos_fijos_2026").insert({"fecha": str(fm), "concepto": cm, "monto": mm, "tipo": tipo_db}).execute()
                 st.cache_data.clear()
                 st.rerun()
+
     if not df_gf.empty:
-        st.dataframe(df_gf.style.format({"Monto": "${:,.2f}"}), use_container_width=True, hide_index=True)
-        with st.expander("Borrar Gasto"):
-            idg = st.number_input("ID Gasto", step=1)
+        # Colorear fila según tipo
+        def color_mov(row):
+            if row['Tipo'] == 'Gasto': return ['background-color: #ffebee']*len(row) # Rojo claro
+            if row['Tipo'] == 'Préstamo Salida': return ['background-color: #e3f2fd']*len(row) # Azul claro
+            if row['Tipo'] == 'Ingreso Extra': return ['background-color: #e8f5e9']*len(row) # Verde claro
+            return ['']*len(row)
+
+        st.dataframe(df_gf.style.apply(color_mov, axis=1).format({"Monto": "${:,.2f}"}), use_container_width=True, hide_index=True)
+        with st.expander("Borrar Movimiento"):
+            idg = st.number_input("ID a borrar", step=1)
             if st.button("Eliminar"):
                 supabase.table("gastos_fijos_2026").delete().eq("id", idg).execute()
                 st.cache_data.clear()
@@ -241,7 +279,6 @@ with t2:
     with st.form("add_viaje", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         fin = c1.date_input("Fecha", date.today())
-        
         prod = c2.selectbox("Fruta", obtener_opciones(df_v, 'Producto', ["Plátano", "Guayabo"]))
         n_prod = c2.text_input("¿Otra fruta?", placeholder="Opcional")
         prov = c3.selectbox("Proveedor", obtener_opciones(df_v, 'Proveedor', ["Omar", "Rancho"]))
@@ -251,14 +288,14 @@ with t2:
 
         cc, cv = st.columns(2)
         with cc:
-            st.markdown("##### 🛒 Compra (Salida Caja)")
+            st.markdown("##### 🛒 Compra")
             kgc = st.number_input("Kg Compra", min_value=0.0, format="%.2f")
             pc = st.number_input("Precio Compra", min_value=0.0, format="%.2f")
             pplaza = st.number_input("Precio Plaza", min_value=0.0, format="%.2f")
             fl = st.number_input("Fletes", min_value=0.0, format="%.2f")
             file_c = st.file_uploader("Factura Compra")
         with cv:
-            st.markdown("##### 🤝 Venta (Entrada si Pagado)")
+            st.markdown("##### 🤝 Venta")
             kgv = st.number_input("Kg Venta", min_value=0.0, format="%.2f")
             pv = st.number_input("Precio Venta", min_value=0.0, format="%.2f")
             desc = st.number_input("Deducciones", min_value=0.0, format="%.2f")
@@ -266,7 +303,6 @@ with t2:
 
         uest = (kgv * pv) - (kgc * pc) - fl - desc
         st.info(f"Utilidad Estimada: ${uest:,.2f}")
-        
         est = st.selectbox("Estado", ["Pagado", "Pendiente"])
         dias = st.number_input("Días Crédito", 8)
 
@@ -287,7 +323,7 @@ with t2:
                     st.success("Registrado!")
                     st.rerun()
 
-# --- CARTERA (EDICIÓN) ---
+# --- CARTERA ---
 with t3:
     if not df_vf.empty:
         col_conf = {
@@ -306,7 +342,7 @@ with t3:
         if evt.selection.rows:
             row = df_vf.iloc[evt.selection.rows[0]]
             st.divider()
-            st.markdown(f"### ✏️ Editando registro de: **{row['Fecha'].strftime('%d-%b')}**")
+            st.markdown(f"### ✏️ Editando: **{row['Fecha'].strftime('%d-%b')}**")
             
             with st.form("edit_full"):
                 c1, c2, c3, c4 = st.columns(4)
@@ -329,39 +365,32 @@ with t3:
                 e_desc = cv3.number_input("Deducciones", value=float(row.get('Descuentos', 0.0)), format="%.2f")
                 e_est = cv4.selectbox("Estado Pago", ["Pagado", "Pendiente"], index=0 if row['Estado_Pago']=="Pagado" else 1)
                 
-                st.markdown("**Soportes (Opcional: Subir para reemplazar)**")
+                st.markdown("**Soportes (Subir para reemplazar)**")
                 cf1, cf2 = st.columns(2)
-                # Aquí agregamos los cargadores de archivos nuevos
-                new_file_c = cf1.file_uploader("Nueva Factura Compra")
-                new_file_v = cf2.file_uploader("Nueva Factura Venta")
+                new_file_c = cf1.file_uploader("Nueva F.Compra")
+                new_file_v = cf2.file_uploader("Nueva F.Venta")
 
-                if st.form_submit_button("💾 Guardar Cambios Completos"):
+                if st.form_submit_button("💾 Guardar Cambios"):
                     nu = (e_kgv * e_pv) - (e_kgc * e_pc) - e_fletes - e_desc
-                    
                     updates = {
-                        "fecha": str(e_fecha),
-                        "cliente": e_cli, "proveedor": e_prov, "producto": e_prod,
+                        "fecha": str(e_fecha), "cliente": e_cli, "proveedor": e_prov, "producto": e_prod,
                         "kg_compra": e_kgc, "precio_compra": e_pc, "precio_plaza": e_plaza, "fletes": e_fletes,
                         "kg_venta": e_kgv, "precio_venta": e_pv, "descuentos": e_desc,
                         "estado_pago": e_est, "utilidad": nu
                     }
-
-                    # Lógica para subir archivos solo si el usuario cargó algo nuevo
                     if new_file_c:
-                        url_c = subir_archivo(new_file_c, f"edit_c_{e_prov}")
-                        if url_c: updates["fec_doc_url"] = url_c
-                    
+                        u = subir_archivo(new_file_c, f"e_c_{e_prov}")
+                        if u: updates["fec_doc_url"] = u
                     if new_file_v:
-                        url_v = subir_archivo(new_file_v, f"edit_v_{e_cli}")
-                        if url_v: updates["fev_doc_url"] = url_v
+                        u = subir_archivo(new_file_v, f"e_v_{e_cli}")
+                        if u: updates["fev_doc_url"] = u
 
                     supabase.table("ventas_2026").update(updates).eq("id", int(row['ID'])).execute()
-                    
                     st.cache_data.clear()
-                    st.success("Registro actualizado correctamente.")
+                    st.success("Actualizado")
                     st.rerun()
             
-            if st.button("🗑️ Borrar Registro Definitivamente"):
+            if st.button("🗑️ Borrar"):
                 supabase.table("ventas_2026").delete().eq("id", int(row['ID'])).execute()
                 st.cache_data.clear()
                 st.rerun()
