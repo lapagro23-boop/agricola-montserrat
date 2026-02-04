@@ -143,25 +143,17 @@ f_fin = st.sidebar.date_input("📅 Fin", date(2026, 12, 31))
 # CARGA DE DATOS
 df_v, df_g, saldo_inicial = cargar_datos()
 
-# CONFIGURACIÓN CAJA
-st.sidebar.divider()
-st.sidebar.subheader("💰 Configuración Caja")
-with st.sidebar.form("config_caja"):
-    nuevo_saldo = st.number_input("Saldo Inicial (Base)", value=float(saldo_inicial), format="%.2f")
-    if st.form_submit_button("Actualizar Base"):
-        supabase.table("configuracion_caja").update({"saldo_inicial": nuevo_saldo}).gt("id", 0).execute()
-        st.cache_data.clear()
-        st.rerun()
-
-# CÁLCULO DE CAJA REAL
-caja_real = saldo_inicial
+# --- LÓGICA DE CAJA (ANTES DE MOSTRAR SIDEBAR) ---
 ingresos_caja = 0
 egresos_caja = 0
 
 if not df_v.empty:
+    # Entradas: Solo Ventas PAGADAS
+    # Valor entrada = KgVenta * PrecioVenta (Bruto)
     ventas_pagadas = df_v[df_v['Estado_Pago'] == 'Pagado']
     ingresos_caja = (ventas_pagadas['Kg_Venta'] * ventas_pagadas['Precio_Venta']).sum()
     
+    # Salidas: Compras + Fletes (TODOS, se asume contado)
     compras_total = (df_v['Kg_Compra'] * df_v['Precio_Compra']).sum()
     fletes_total = df_v['Fletes'].sum()
     egresos_caja += compras_total + fletes_total
@@ -169,23 +161,39 @@ if not df_v.empty:
 if not df_g.empty:
     egresos_caja += df_g['Monto'].sum()
 
-caja_real = saldo_inicial + ingresos_caja - egresos_caja
+# Cálculo actual del sistema
+flujo_acumulado = ingresos_caja - egresos_caja
+caja_sistema = saldo_inicial + flujo_acumulado
+
+# CONFIGURACIÓN CAJA (Calibración)
+st.sidebar.divider()
+st.sidebar.subheader("💰 Calibrar Caja")
+with st.sidebar.form("config_caja"):
+    st.caption(f"El sistema calcula: ${caja_sistema:,.0f}")
+    valor_real_usuario = st.number_input("¿Cuánto tienes REALMENTE hoy?", value=float(caja_sistema), format="%.2f")
+    
+    if st.form_submit_button("✅ Ajustar a Realidad"):
+        # Matemática inversa: Si Caja_Real = Base + Flujo
+        # Entonces: Nueva_Base = Caja_Real - Flujo
+        nueva_base = valor_real_usuario - flujo_acumulado
+        supabase.table("configuracion_caja").update({"saldo_inicial": nueva_base}).gt("id", 0).execute()
+        st.cache_data.clear()
+        st.success("¡Caja Calibrada!")
+        st.rerun()
 
 # FILTROS
 df_vf = df_v[(df_v['Fecha'].dt.date >= f_ini) & (df_v['Fecha'].dt.date <= f_fin)].copy() if not df_v.empty else pd.DataFrame()
 df_gf = df_g[(df_g['Fecha'].dt.date >= f_ini) & (df_g['Fecha'].dt.date <= f_fin)].copy() if not df_g.empty else pd.DataFrame(columns=['ID','Fecha','Concepto','Monto'])
 
-# ALERTAS (CORREGIDAS)
+# ALERTAS
 if not df_v.empty:
     pend = df_v[df_v['Estado_Pago'] == 'Pendiente'].copy()
     if not pend.empty:
         pend['Dias_Credito'] = pd.to_numeric(pend['Dias_Credito'], errors='coerce').fillna(0)
         pend['Vence'] = pend['Fecha'] + pd.to_timedelta(pend['Dias_Credito'], unit='D')
-        
         hoy_ts = pd.Timestamp.now().normalize()
         mask_urg = (pend['Vence'] - hoy_ts).dt.days <= 3
         urg = pend[mask_urg]
-        
         if not urg.empty: st.error(f"🔔 Tienes {len(urg)} facturas críticas por cobrar.")
 
 # PESTAÑAS
@@ -198,11 +206,12 @@ with t1:
     vol = df_vf['Kg_Venta'].sum() if not df_vf.empty else 0
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("💰 CAJA REAL (DISPONIBLE)", f"${caja_real:,.0f}", delta="Efectivo en mano")
+    # Mostramos la caja calibrada (que es igual a caja_sistema tras recargar)
+    c1.metric("💰 CAJA REAL (DISPONIBLE)", f"${caja_sistema:,.0f}", delta="Efectivo en mano")
     c2.metric("Utilidad Periodo", f"${ub:,.0f}", delta="Rentabilidad")
     c3.metric("Volumen Movido", f"{vol:,.1f} Kg")
     
-    st.info(f"💡 **Explicación Caja:** Base (${saldo_inicial:,.0f}) + Cobros (${ingresos_caja:,.0f}) - Pagos/Gastos (${egresos_caja:,.0f}) = **${caja_real:,.0f}**")
+    st.info(f"💡 **Flujo:** Cobros (${ingresos_caja:,.0f}) - Pagos/Gastos (${egresos_caja:,.0f}) + Base Ajustada")
 
 # --- ANALÍTICA ---
 with t_ana:
@@ -211,7 +220,7 @@ with t_ana:
         c1, c2 = st.columns([3,1])
         with c1:
             if not df_p.empty:
-                # Aquí estaba el error, lo he simplificado
+                # Gráfica corregida y segura
                 fig = px.line(df_p, x='Fecha', y=['Precio_Compra', 'Precio_Plaza'], markers=True, title="Precios: Compra vs Plaza")
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("Faltan datos de plaza.")
