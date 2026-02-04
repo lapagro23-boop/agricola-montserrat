@@ -4,172 +4,110 @@ import plotly.express as px
 from datetime import date, timedelta, datetime
 from supabase import create_client
 import io
+import re
+import unicodedata
 
-# --- 1. CONFIGURACIÓN INICIAL Y DISEÑO ---
+# --- 1. CONFIGURACIÓN E INYECCIÓN CSS ---
 st.set_page_config(page_title="Agrícola Montserrat", layout="wide", page_icon="🍌")
 
-# --- 🎨 INYECCIÓN DE CSS (DISEÑO) ---
 st.markdown("""
     <style>
-    /* Fondo general suave */
-    .stApp {
-        background-color: #f8fcf8;
-    }
-    
-    /* Títulos Principales en Verde Agrícola */
-    h1, h2, h3 {
-        color: #1b5e20 !important;
-        font-family: 'Helvetica Neue', sans-serif;
-    }
-    
-    /* Tarjetas para las Métricas (KPIs) */
+    .stApp { background-color: #f8fcf8; }
+    h1, h2, h3 { color: #1b5e20 !important; font-family: 'Helvetica Neue', sans-serif; }
     div[data-testid="stMetric"] {
-        background-color: #ffffff;
-        border: 1px solid #c8e6c9;
-        padding: 15px;
-        border-radius: 10px;
-        box-shadow: 2px 2px 5px rgba(0,0,0,0.05);
-        text-align: center;
+        background-color: #ffffff; border: 1px solid #c8e6c9;
+        padding: 15px; border-radius: 10px;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.05); text-align: center;
     }
-    
-    /* Etiquetas de las métricas */
-    div[data-testid="stMetricLabel"] {
-        color: #388e3c;
-        font-weight: bold;
-    }
-
-    /* Botones principales */
+    div[data-testid="stMetricLabel"] { color: #388e3c; font-weight: bold; }
     .stButton>button {
-        background-color: #2e7d32;
-        color: white;
-        border-radius: 8px;
-        border: none;
-        padding: 10px 20px;
-        font-weight: bold;
+        background-color: #2e7d32; color: white; border-radius: 8px; border: none;
+        padding: 10px 20px; font-weight: bold;
     }
-    .stButton>button:hover {
-        background-color: #1b5e20;
-        color: white;
-    }
-
-    /* Pestañas (Tabs) */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 10px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        background-color: #ffffff;
-        border-radius: 5px 5px 0 0;
-        padding: 10px 20px;
-        border: 1px solid #e0e0e0;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #e8f5e9 !important;
-        color: #1b5e20 !important;
-        border-bottom: 2px solid #2e7d32 !important;
-    }
-    
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background-color: #ffffff;
-        border-right: 1px solid #e0e0e0;
-    }
+    .stButton>button:hover { background-color: #1b5e20; color: white; }
+    [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e0e0e0; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 🔒 BLOQUE DE SEGURIDAD ---
+# --- SEGURIDAD ---
 def check_password():
-    if st.session_state["password_input"] == st.secrets["APP_PASSWORD"]:
+    if st.session_state.get("password_input") == st.secrets["APP_PASSWORD"]:
         st.session_state["password_correct"] = True
         del st.session_state["password_input"]
-    else:
-        st.error("😕 Clave incorrecta, intenta de nuevo.")
+    else: st.error("😕 Clave incorrecta.")
 
-if "password_correct" not in st.session_state:
-    st.session_state["password_correct"] = False
-
-if not st.session_state["password_correct"]:
+if not st.session_state.get("password_correct", False):
     st.title("🔐 Acceso Restringido")
-    st.markdown("### Agrícola Montserrat 2026")
     st.text_input("Ingresa la clave maestra:", type="password", key="password_input", on_change=check_password)
     st.stop()
 
-# --- CONEXIÓN A SUPABASE ---
+# --- CONEXIÓN SUPABASE ---
 try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+    supabase = create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    BUCKET_FACTURAS = "facturas"
 except:
-    st.error("⚠️ Faltan las credenciales de Supabase en los Secrets.")
+    st.error("⚠️ Error de conexión.")
     st.stop()
 
-@st.cache_resource
-def init_connection():
+# --- FUNCIONES ---
+
+def limpiar_nombre(nombre):
+    nombre = unicodedata.normalize('NFKD', nombre).encode('ASCII', 'ignore').decode('utf-8')
+    nombre = nombre.replace(" ", "_")
+    return re.sub(r'[^\w.-]', '', nombre)
+
+def subir_archivo(archivo, nombre_base):
+    if archivo:
+        try:
+            ext = archivo.name.split('.')[-1]
+            path = f"{limpiar_nombre(nombre_base)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
+            supabase.storage.from_(BUCKET_FACTURAS).upload(path, archivo.getvalue(), {"content-type": archivo.type, "upsert": "true"})
+            return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(path)
+        except: return None
+    return None
+
+@st.cache_data(ttl=5) # Cache corto para actualizar rápido al editar
+def cargar_datos():
+    # 1. Ventas
+    df_v = pd.DataFrame()
     try:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
-        st.error(f"Error conectando con Supabase: {e}")
-        return None
-
-supabase = init_connection()
-BUCKET_FACTURAS = "facturas" 
-
-# --- 2. FUNCIONES DE LÓGICA ---
-
-@st.cache_data(ttl=60) 
-def cargar_ventas():
-    if not supabase: return pd.DataFrame()
-    try:
-        response = supabase.table("ventas_2026").select("*").order("fecha", desc=True).execute()
-        df = pd.DataFrame(response.data)
-        if not df.empty:
-            mapa_cols = {
+        res = supabase.table("ventas_2026").select("*").order("fecha", desc=True).execute()
+        df_v = pd.DataFrame(res.data)
+        if not df_v.empty:
+            cols = {
                 'id': 'ID', 'fecha': 'Fecha', 'producto': 'Producto', 'proveedor': 'Proveedor', 
                 'cliente': 'Cliente', 'fec_doc_url': 'FEC_Doc', 'fev_doc_url': 'FEV_Doc', 
                 'kg_compra': 'Kg_Compra', 'precio_compra': 'Precio_Compra', 'fletes': 'Fletes',
-                'viaticos': 'Viaticos', 'otros_gastos': 'Otros_Gastos', 'kg_venta': 'Kg_Venta',
-                'precio_venta': 'Precio_Venta', 'retenciones': 'Retenciones', 'descuentos': 'Descuentos',
+                'kg_venta': 'Kg_Venta', 'precio_venta': 'Precio_Venta', 'descuentos': 'Descuentos',
                 'utilidad': 'Utilidad', 'estado_pago': 'Estado_Pago', 'dias_credito': 'Dias_Credito',
                 'precio_plaza': 'Precio_Plaza'
             }
-            df = df.rename(columns={k: v for k, v in mapa_cols.items() if k in df.columns})
-            if 'Fecha' in df.columns: df['Fecha'] = pd.to_datetime(df['Fecha'])
-            
-            cols_url = ['FEC_Doc', 'FEV_Doc']
-            for col in cols_url:
-                if col in df.columns: df[col] = df[col].replace({'': None, 'None': None, 'nan': None})
-            
-            if 'Precio_Plaza' not in df.columns: df['Precio_Plaza'] = 0.0
-            else: df['Precio_Plaza'] = pd.to_numeric(df['Precio_Plaza']).fillna(0.0)
+            df_v = df_v.rename(columns={k: v for k, v in cols.items() if k in df_v.columns})
+            df_v['Fecha'] = pd.to_datetime(df_v['Fecha'])
+            # Asegurar columnas numéricas
+            for c in ['Kg_Compra','Precio_Compra','Fletes','Kg_Venta','Precio_Venta','Descuentos','Utilidad','Precio_Plaza']:
+                if c in df_v.columns: df_v[c] = pd.to_numeric(df_v[c]).fillna(0.0)
+    except: pass
 
-            return df
-    except: return pd.DataFrame()
-    return pd.DataFrame()
-
-@st.cache_data(ttl=60)
-def cargar_gastos():
-    if not supabase: return pd.DataFrame()
+    # 2. Gastos
+    df_g = pd.DataFrame()
     try:
-        response = supabase.table("gastos_fijos_2026").select("*").order("fecha", desc=True).execute()
-        df = pd.DataFrame(response.data)
-        if not df.empty:
-            df = df.rename(columns={'id': 'ID', 'fecha': 'Fecha', 'concepto': 'Concepto', 'monto': 'Monto'})
-            df['Fecha'] = pd.to_datetime(df['Fecha'])
-            return df
-    except: return pd.DataFrame()
-    return pd.DataFrame()
+        res_g = supabase.table("gastos_fijos_2026").select("*").order("fecha", desc=True).execute()
+        df_g = pd.DataFrame(res_g.data)
+        if not df_g.empty:
+            df_g = df_g.rename(columns={'id': 'ID', 'fecha': 'Fecha', 'concepto': 'Concepto', 'monto': 'Monto'})
+            df_g['Fecha'] = pd.to_datetime(df_g['Fecha'])
+            df_g['Monto'] = pd.to_numeric(df_g['Monto']).fillna(0.0)
+    except: pass
 
-def subir_archivo(archivo, nombre_base):
-    if archivo and supabase:
-        try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            nombre_clean = "".join(c for c in archivo.name if c.isalnum() or c in "._-")
-            nombre_archivo = f"{nombre_base}_{timestamp}_{nombre_clean}"
-            archivo_bytes = archivo.getvalue()
-            supabase.storage.from_(BUCKET_FACTURAS).upload(path=nombre_archivo, file=archivo_bytes, file_options={"content-type": archivo.type})
-            return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
-        except Exception as e:
-            st.error(f"Error subiendo: {e}")
-            return None
-    return None
+    # 3. Saldo Inicial (Config)
+    saldo_ini = 0.0
+    try:
+        res_c = supabase.table("configuracion_caja").select("saldo_inicial").limit(1).execute()
+        if res_c.data: saldo_ini = float(res_c.data[0]['saldo_inicial'])
+    except: pass
+
+    return df_v, df_g, saldo_ini
 
 def color_deuda(row):
     color = ''
@@ -178,9 +116,8 @@ def color_deuda(row):
         elif row['Estado_Pago'] == 'Pendiente':
             dias = int(row['Dias_Credito']) if pd.notnull(row['Dias_Credito']) else 0
             vence = row['Fecha'] + timedelta(days=dias)
-            dias_rest = (vence.date() - date.today()).days
-            if dias_rest < 0: color = 'background-color: #ffebee; color: #b71c1c; font-weight: bold;' 
-            elif dias_rest <= 3: color = 'background-color: #fff8e1; color: #f57f17; font-weight: bold;'
+            if (vence.date() - date.today()).days < 0: color = 'background-color: #ffebee; color: #b71c1c; font-weight: bold;'
+            elif (vence.date() - date.today()).days <= 3: color = 'background-color: #fff8e1; color: #f57f17; font-weight: bold;'
     except: pass
     return [color] * len(row)
 
@@ -188,19 +125,13 @@ def obtener_opciones(df, col, defaults):
     existentes = df[col].unique().tolist() if not df.empty and col in df.columns else []
     return sorted(list(set(defaults + [x for x in existentes if x])))
 
-@st.cache_data
-def convertir_df_a_csv(df):
-    return df.to_csv(index=False).encode('utf-8')
-
-# --- INICIO INTERFAZ ---
+# --- INTERFAZ ---
 st.markdown("# 🍌 Agrícola Montserrat")
 st.markdown("### _Sistema de Gestión Integral 2026_")
-st.markdown("---")
+st.divider()
 
 # SIDEBAR
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2909/2909798.png", width=50)
 st.sidebar.title("Menú")
-st.sidebar.header("⚙️ Configuración")
 if st.sidebar.button("🔄 Actualizar Datos"):
     st.cache_data.clear()
     st.rerun()
@@ -209,239 +140,228 @@ st.sidebar.divider()
 f_ini = st.sidebar.date_input("📅 Inicio", date(2026, 1, 1))
 f_fin = st.sidebar.date_input("📅 Fin", date(2026, 12, 31))
 
-df_ventas = cargar_ventas()
-df_gastos = cargar_gastos()
+# CARGA DE DATOS
+df_v, df_g, saldo_inicial = cargar_datos()
 
-# FILTROS
-if not df_ventas.empty:
-    mask_v = (df_ventas['Fecha'].dt.date >= f_ini) & (df_ventas['Fecha'].dt.date <= f_fin)
-    df_v_filtrado = df_ventas.loc[mask_v].copy()
-else: df_v_filtrado = pd.DataFrame(columns=df_ventas.columns)
+# CONFIGURACIÓN DE SALDO INICIAL
+st.sidebar.divider()
+st.sidebar.subheader("💰 Configuración Caja")
+with st.sidebar.form("config_caja"):
+    nuevo_saldo = st.number_input("Saldo Inicial (Base)", value=float(saldo_inicial), format="%.2f")
+    if st.form_submit_button("Actualizar Base"):
+        supabase.table("configuracion_caja").update({"saldo_inicial": nuevo_saldo}).gt("id", 0).execute()
+        st.cache_data.clear()
+        st.rerun()
 
-if not df_gastos.empty:
-    mask_g = (df_gastos['Fecha'].dt.date >= f_ini) & (df_gastos['Fecha'].dt.date <= f_fin)
-    df_g_filtrado = df_gastos.loc[mask_g].copy()
-else: df_g_filtrado = pd.DataFrame(columns=['ID', 'Fecha', 'Concepto', 'Monto'])
+# CÁLCULO DE CAJA REAL
+caja_real = saldo_inicial
+ingresos_caja = 0
+egresos_caja = 0
 
-if not df_ventas.empty:
-    st.sidebar.divider()
-    st.sidebar.subheader("📂 Reportes")
-    csv = convertir_df_a_csv(df_ventas)
-    st.sidebar.download_button("📥 Bajar Ventas (CSV)", csv, f"Ventas_{date.today()}.csv", "text/csv")
+if not df_v.empty:
+    # Entradas: Solo Ventas PAGADAS
+    ventas_pagadas = df_v[df_v['Estado_Pago'] == 'Pagado']
+    # Ingreso real = (KgVenta * PrecioVenta) - Retenciones/Descuentos si aplicara, 
+    # pero simplificado es el valor total de la factura de venta.
+    # Asumimos que Utilidad = Venta - Compra - Gastos.
+    # Para Caja necesitamos el Flujo Bruto de Entrada.
+    # Entrada = Kg_Venta * Precio_Venta
+    ingresos_caja = (ventas_pagadas['Kg_Venta'] * ventas_pagadas['Precio_Venta']).sum()
+    
+    # Salidas: Compras + Fletes (Se asume pago inmediato) de TODOS los viajes (Pagados o Pendientes)
+    # Porque al campesino se le paga de contado casi siempre.
+    compras_total = (df_v['Kg_Compra'] * df_v['Precio_Compra']).sum()
+    fletes_total = df_v['Fletes'].sum()
+    egresos_caja += compras_total + fletes_total
+
+if not df_g.empty:
+    egresos_caja += df_g['Monto'].sum()
+
+caja_real = saldo_inicial + ingresos_caja - egresos_caja
+
+# FILTROS DE FECHA PARA VISUALIZACIÓN
+df_vf = df_v[(df_v['Fecha'].dt.date >= f_ini) & (df_v['Fecha'].dt.date <= f_fin)].copy() if not df_v.empty else pd.DataFrame()
+df_gf = df_g[(df_g['Fecha'].dt.date >= f_ini) & (df_g['Fecha'].dt.date <= f_fin)].copy() if not df_g.empty else pd.DataFrame(columns=['ID','Fecha','Concepto','Monto'])
 
 # ALERTAS
-if not df_ventas.empty:
-    hoy = date.today()
-    if 'Estado_Pago' in df_ventas.columns:
-        pendientes = df_ventas[df_ventas['Estado_Pago'] == 'Pendiente'].copy()
-        if not pendientes.empty:
-            pendientes['Dias_Credito'] = pd.to_numeric(pendientes['Dias_Credito'], errors='coerce').fillna(0)
-            pendientes['Vence'] = (pendientes['Fecha'] + pd.to_timedelta(pendientes['Dias_Credito'], unit='D')).dt.date
-            pendientes['Dias_Restantes'] = (pendientes['Vence'] - hoy).apply(lambda x: x.days)
-            urgentes = pendientes[pendientes['Dias_Restantes'] <= 3]
-            if not urgentes.empty:
-                st.error(f"🔔 Tienes {len(urgentes)} facturas por cobrar urgentes.")
+if not df_v.empty:
+    pend = df_v[df_v['Estado_Pago'] == 'Pendiente'].copy()
+    if not pend.empty:
+        hoy = date.today()
+        pend['Vence'] = pend.apply(lambda x: x['Fecha'] + timedelta(days=x.get('Dias_Credito',0)), axis=1)
+        urg = pend[(pend['Vence'].dt.date - hoy).dt.days <= 3]
+        if not urg.empty: st.error(f"🔔 Tienes {len(urg)} facturas críticas por cobrar.")
 
 # PESTAÑAS
-tab1, tab_ana, tab_gastos, tab2, tab3 = st.tabs(["📊 Dashboard", "📈 Analítica", "💸 Gastos", "🧮 Nueva Op.", "🚦 Cartera"])
+t1, t_ana, t_gas, t2, t3 = st.tabs(["📊 Dashboard", "📈 Analítica", "💸 Gastos", "🧮 Nueva Op.", "🚦 Cartera (Editar)"])
 
-# --- TAB 1: DASHBOARD ---
-with tab1:
-    st.subheader("💰 Resultados Financieros")
+# --- DASHBOARD ---
+with t1:
+    st.subheader("Estado Financiero")
     
-    utilidad_bruta = df_v_filtrado['Utilidad'].sum() if not df_v_filtrado.empty else 0
-    total_gastos = df_g_filtrado['Monto'].sum() if not df_g_filtrado.empty else 0
-    utilidad_neta_real = utilidad_bruta - total_gastos
-    kg_movidos = df_v_filtrado['Kg_Venta'].sum() if not df_v_filtrado.empty else 0
+    # Métricas Generales
+    ub = df_vf['Utilidad'].sum() if not df_vf.empty else 0
+    vol = df_vf['Kg_Venta'].sum() if not df_vf.empty else 0
     
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Utilidad Bruta", f"${utilidad_bruta:,.0f}", delta="Operativa")
-    k2.metric("Gastos Fijos", f"${total_gastos:,.0f}", delta="- Salidas", delta_color="inverse")
-    k3.metric("UTILIDAD NETA", f"${utilidad_neta_real:,.0f}", delta="Bolsillo Real")
-    k4.metric("Volumen (Kg)", f"{kg_movidos:,.1f} Kg")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("💰 CAJA REAL (DISPONIBLE)", f"${caja_real:,.0f}", delta="Efectivo en mano")
+    c2.metric("Utilidad Periodo", f"${ub:,.0f}", delta="Rentabilidad")
+    c3.metric("Volumen Movido", f"{vol:,.1f} Kg")
     
-    st.markdown("---")
-    
-    g1, g2 = st.columns(2)
-    with g1:
-        st.caption("Balance General")
-        datos_bal = pd.DataFrame({
-            'Concepto': ['Utilidad Operativa', 'Gastos Fijos', 'Utilidad Neta'],
-            'Monto': [utilidad_bruta, total_gastos, utilidad_neta_real],
-            'Color': ['#2196f3', '#f44336', '#4caf50']
-        })
-        st.plotly_chart(px.bar(datos_bal, x='Concepto', y='Monto', color='Concepto', color_discrete_map={'Utilidad Operativa': '#2196f3', 'Gastos Fijos': '#f44336', 'Utilidad Neta': '#4caf50'}), use_container_width=True)
+    st.info(f"💡 **Explicación Caja:** Base (${saldo_inicial:,.0f}) + Cobros (${ingresos_caja:,.0f}) - Pagos/Gastos (${egresos_caja:,.0f}) = **${caja_real:,.0f}**")
 
-    with g2:
-        if not df_g_filtrado.empty:
-            st.caption("Distribución de Gastos")
-            st.plotly_chart(px.pie(df_g_filtrado, values='Monto', names='Concepto', hole=0.4, color_discrete_sequence=px.colors.sequential.RdBu), use_container_width=True)
-        else:
-            st.info("No hay gastos registrados en este periodo.")
+# --- ANALÍTICA ---
+with t_ana:
+    if not df_vf.empty:
+        df_p = df_vf[df_vf['Precio_Plaza'] > 0].sort_values("Fecha")
+        c1, c2 = st.columns([3,1])
+        with c1:
+            if not df_p.empty:
+                st.plotly_chart(px.line(df_p, x='Fecha', y=['Precio_Compra', 'Precio_Plaza'], markers=True, title="Precios: Compra vs Plaza"), use_container_width=True)
+            else: st.info("Faltan datos de plaza.")
+        with c2:
+            if not df_p.empty:
+                ahorro = df_p['Precio_Plaza'].mean() - df_p['Precio_Compra'].mean()
+                st.metric("Margen vs Plaza", f"${ahorro:,.0f}", delta="Ahorro/Kg" if ahorro>0 else "Sobrecosto")
 
-# --- TAB GASTOS ---
-with tab_gastos:
-    st.subheader("💸 Registro de Gastos Fijos")
-    with st.form("form_gasto", clear_on_submit=True):
-        c_g1, c_g2, c_g3 = st.columns(3)
-        fecha_g = c_g1.date_input("Fecha", date.today())
-        concepto_g = c_g2.text_input("Concepto (Gasolina, Nómina...)")
-        monto_g = c_g3.number_input("Valor ($)", min_value=0.0)
-        
-        if st.form_submit_button("🔴 Registrar Gasto"):
-            if concepto_g and monto_g > 0:
-                supabase.table("gastos_fijos_2026").insert({
-                    "fecha": str(fecha_g), "concepto": concepto_g, "monto": monto_g
-                }).execute()
+# --- GASTOS ---
+with t_gas:
+    with st.form("add_gasto", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        fg = c1.date_input("Fecha", date.today())
+        cg = c2.text_input("Concepto")
+        mg = c3.number_input("Valor", min_value=0.0, format="%.2f")
+        if st.form_submit_button("Registrar Gasto"):
+            if cg and mg > 0:
+                supabase.table("gastos_fijos_2026").insert({"fecha": str(fg), "concepto": cg, "monto": mg}).execute()
                 st.cache_data.clear()
-                st.success("Gasto registrado")
                 st.rerun()
-            else: st.error("Faltan datos.")
-    
-    st.markdown("---")
-    st.subheader("Historial de Gastos")
-    if not df_g_filtrado.empty:
-        st.dataframe(df_g_filtrado.style.format({"Monto": "${:,.0f}"}), use_container_width=True, hide_index=True)
-        with st.expander("🗑️ Borrar Gasto"):
-            id_borrar = st.number_input("ID del gasto", min_value=1, step=1)
-            if st.button("Eliminar Gasto"):
-                supabase.table("gastos_fijos_2026").delete().eq("id", id_borrar).execute()
+    if not df_gf.empty:
+        st.dataframe(df_gf.style.format({"Monto": "${:,.2f}"}), use_container_width=True, hide_index=True)
+        with st.expander("Borrar Gasto"):
+            idg = st.number_input("ID Gasto", step=1)
+            if st.button("Eliminar"):
+                supabase.table("gastos_fijos_2026").delete().eq("id", idg).execute()
                 st.cache_data.clear()
-                st.warning("Eliminado.")
                 st.rerun()
-    else: st.info("Sin gastos.")
 
-# --- TAB ANALÍTICA ---
-with tab_ana:
-    st.subheader("🧠 Inteligencia de Mercado")
-    if not df_v_filtrado.empty:
-        df_plaza = df_v_filtrado[df_v_filtrado['Precio_Plaza'] > 0].copy()
-        c_graf, c_info = st.columns([2, 1])
-        with c_graf:
-            if not df_plaza.empty:
-                df_line = df_plaza.sort_values("Fecha")
-                fig = px.line(df_line, x='Fecha', y=['Precio_Compra', 'Precio_Plaza'], markers=True, title="Histórico: Mi Compra vs Plaza")
-                # Personalizar colores línea
-                new_names = {'Precio_Compra': 'Mi Precio', 'Precio_Plaza': 'Precio Plaza'}
-                fig.for_each_trace(lambda t: t.update(name = new_names[t.name]))
-                st.plotly_chart(fig, use_container_width=True)
-            else: st.info("Faltan datos de precio plaza.")
+# --- NUEVA OPERACIÓN ---
+with t2:
+    with st.form("add_viaje", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns(4)
+        fin = c1.date_input("Fecha", date.today())
         
-        with c_info:
-            if not df_plaza.empty:
-                prom_c = df_plaza['Precio_Compra'].mean()
-                prom_p = df_plaza['Precio_Plaza'].mean()
-                diff = prom_p - prom_c
-                
-                st.markdown("#### Comparativa Promedio")
-                st.metric("Promedio Plaza", f"${prom_p:,.0f}")
-                st.metric("Mi Promedio", f"${prom_c:,.0f}")
-                
-                if diff > 0: st.success(f"Estás ahorrando ${diff:,.0f} por kilo vs la plaza.")
-                else: st.error(f"Estás pagando ${abs(diff):,.0f} de sobrecosto vs plaza.")
+        prod = c2.selectbox("Fruta", obtener_opciones(df_v, 'Producto', ["Plátano", "Guayabo"]))
+        n_prod = c2.text_input("¿Otra fruta?", placeholder="Opcional")
+        prov = c3.selectbox("Proveedor", obtener_opciones(df_v, 'Proveedor', ["Omar", "Rancho"]))
+        n_prov = c3.text_input("¿Otro prov?", placeholder="Opcional")
+        cli = c4.selectbox("Cliente", obtener_opciones(df_v, 'Cliente', ["Calima", "Fogón"]))
+        n_cli = c4.text_input("¿Otro cli?", placeholder="Opcional")
 
-# --- TAB REGISTRO ---
-with tab2:
-    st.subheader("📝 Nuevo Viaje")
-    with st.form("registro_viaje", clear_on_submit=True):
-        r1, r2, r3, r4 = st.columns(4)
-        fecha_in = r1.date_input("Fecha", date.today())
+        cc, cv = st.columns(2)
+        with cc:
+            st.markdown("##### 🛒 Compra (Salida Caja)")
+            kgc = st.number_input("Kg Compra", min_value=0.0, format="%.2f")
+            pc = st.number_input("Precio Compra", min_value=0.0, format="%.2f")
+            pplaza = st.number_input("Precio Plaza", min_value=0.0, format="%.2f")
+            fl = st.number_input("Fletes", min_value=0.0, format="%.2f")
+            file_c = st.file_uploader("Factura Compra")
+        with cv:
+            st.markdown("##### 🤝 Venta (Entrada si Pagado)")
+            kgv = st.number_input("Kg Venta", min_value=0.0, format="%.2f")
+            pv = st.number_input("Precio Venta", min_value=0.0, format="%.2f")
+            desc = st.number_input("Deducciones", min_value=0.0, format="%.2f")
+            file_v = st.file_uploader("Factura Venta")
+
+        uest = (kgv * pv) - (kgc * pc) - fl - desc
+        st.info(f"Utilidad Estimada: ${uest:,.2f}")
         
-        l_prod = obtener_opciones(df_ventas, 'Producto', ["Plátano", "Guayabo"])
-        s_prod = r2.selectbox("Fruta", l_prod)
-        # --- CORRECCIÓN AQUÍ: NOMBRES ÚNICOS PARA EVITAR ERROR ---
-        n_prod = r2.text_input("¿Otra fruta?", placeholder="Si no está en lista")
-        
-        l_prov = obtener_opciones(df_ventas, 'Proveedor', ["Omar", "Rancho"])
-        s_prov = r3.selectbox("Proveedor", l_prov)
-        # --- CORRECCIÓN AQUÍ ---
-        n_prov = r3.text_input("¿Otro proveedor?", placeholder="Si no está en lista")
-
-        l_cli = obtener_opciones(df_ventas, 'Cliente', ["Calima", "Fogón", "HEFE"])
-        s_cli = r4.selectbox("Cliente", l_cli)
-        # --- CORRECCIÓN AQUÍ ---
-        n_cli = r4.text_input("¿Otro cliente?", placeholder="Si no está en lista")
-
-        c_c, c_v = st.columns(2)
-        with c_c:
-            st.markdown("##### 🛒 Compra")
-            kgc = st.number_input("Kg Compra", min_value=0.0)
-            pc = st.number_input("Precio Compra", min_value=0.0)
-            pplaza = st.number_input("Precio Plaza (Ref)", min_value=0.0)
-            fl = st.number_input("Fletes", min_value=0.0)
-            fec_file = st.file_uploader("Factura Compra")
-        with c_v:
-            st.markdown("##### 🤝 Venta")
-            kgv = st.number_input("Kg Venta", min_value=0.0)
-            pv = st.number_input("Precio Venta", min_value=0.0)
-            desc = st.number_input("Deducciones", min_value=0.0)
-            fev_file = st.file_uploader("Factura Venta")
-
-        util_est = (kgv * pv) - (kgc * pc) - fl - desc
-        st.info(f"💰 Utilidad Estimada de este viaje: **${util_est:,.0f}**")
-        
-        estado = st.selectbox("Estado Pago", ["Pagado", "Pendiente"])
+        est = st.selectbox("Estado", ["Pagado", "Pendiente"])
         dias = st.number_input("Días Crédito", 8)
 
-        if st.form_submit_button("💾 Guardar Operación"):
-            fin_prod = n_prod if n_prod else s_prod
-            fin_prov = n_prov if n_prov else s_prov
-            fin_cli = n_cli if n_cli else s_cli
-            if fin_prov and fin_cli:
-                with st.spinner("Subiendo datos..."):
-                    uc = subir_archivo(fec_file, f"compra_{fin_prov}")
-                    uv = subir_archivo(fev_file, f"venta_{fin_cli}")
+        if st.form_submit_button("Guardar Viaje"):
+            f_prod, f_prov, f_cli = n_prod or prod, n_prov or prov, n_cli or cli
+            if f_prov and f_cli:
+                with st.spinner("Guardando..."):
+                    uc = subir_archivo(file_c, f"c_{f_prov}")
+                    uv = subir_archivo(file_v, f"v_{f_cli}")
                     data = {
-                        "fecha": str(fecha_in), "producto": fin_prod, "proveedor": fin_prov, "cliente": fin_cli,
-                        "kg_compra": kgc, "precio_compra": pc, "fletes": fl, "viaticos": 0, "otros_gastos": 0,
-                        "kg_venta": kgv, "precio_venta": pv, "retenciones": 0, "descuentos": desc,
-                        "utilidad": util_est, "estado_pago": estado, "dias_credito": dias,
+                        "fecha": str(fin), "producto": f_prod, "proveedor": f_prov, "cliente": f_cli,
+                        "kg_compra": kgc, "precio_compra": pc, "fletes": fl, "kg_venta": kgv, "precio_venta": pv, 
+                        "descuentos": desc, "utilidad": uest, "estado_pago": est, "dias_credito": dias, 
                         "precio_plaza": pplaza, "fec_doc_url": uc if uc else "", "fev_doc_url": uv if uv else ""
                     }
                     supabase.table("ventas_2026").insert(data).execute()
                     st.cache_data.clear()
-                    st.success("Guardado Exitosamente")
+                    st.success("Registrado!")
                     st.rerun()
 
-# --- TAB CARTERA ---
-with tab3:
-    st.subheader("📋 Historial y Cartera")
-    if not df_v_filtrado.empty:
-        col_cfg = {
-            "FEC_Doc": st.column_config.LinkColumn("F.C", display_text="📄"),
-            "FEV_Doc": st.column_config.LinkColumn("F.V", display_text="📄"),
+# --- CARTERA (EDICIÓN) ---
+with t3:
+    if not df_vf.empty:
+        col_conf = {
+            "FEC_Doc": st.column_config.LinkColumn("F.C", display_text="Ver"),
+            "FEV_Doc": st.column_config.LinkColumn("F.V", display_text="Ver"),
             "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
             "Utilidad": st.column_config.NumberColumn("Utilidad", format="$%d"),
         }
-        event = st.dataframe(df_v_filtrado.style.apply(color_deuda, axis=1), use_container_width=True, column_config=col_cfg, selection_mode="single-row", on_select="rerun", hide_index=True)
         
-        if event.selection.rows:
-            row = df_v_filtrado.iloc[event.selection.rows[0]]
+        evt = st.dataframe(
+            df_vf.style.apply(color_deuda, axis=1),
+            use_container_width=True, column_config=col_conf,
+            selection_mode="single-row", on_select="rerun", hide_index=True
+        )
+        
+        if evt.selection.rows:
+            row = df_vf.iloc[evt.selection.rows[0]]
             st.divider()
-            with st.form("edit"):
-                st.markdown(f"**Editando:** {row['Cliente']} ({row['Fecha'].date()})")
+            st.markdown(f"### ✏️ Editando registro de: **{row['Fecha'].strftime('%d-%b')}**")
+            
+            with st.form("edit_full"):
+                # Fila 1: Fecha (Preserva la original) y Actores
                 c1, c2, c3, c4 = st.columns(4)
-                ekc = c1.number_input("KgC", value=float(row['Kg_Compra']))
-                epc = c2.number_input("PreC", value=float(row['Precio_Compra']))
-                epp = c3.number_input("Plaza", value=float(row['Precio_Plaza']))
-                ekv = c4.number_input("KgV", value=float(row['Kg_Venta']))
-                c5, c6 = st.columns(2)
-                epv = c5.number_input("PreV", value=float(row['Precio_Venta']))
-                eest = c6.selectbox("Est", ["Pagado", "Pendiente"], index=0 if row['Estado_Pago'] == "Pagado" else 1)
+                # AQUÍ ESTÁ LA MAGIA: Default value = fecha original
+                e_fecha = c1.date_input("Fecha Original", value=pd.to_datetime(row['Fecha']).date())
+                e_cli = c2.text_input("Cliente", value=row['Cliente'])
+                e_prov = c3.text_input("Proveedor", value=row['Proveedor'])
+                e_prod = c4.text_input("Producto", value=row['Producto'])
                 
-                if st.form_submit_button("💾 Actualizar"):
-                    gastos = row['Fletes'] + row['Descuentos']
-                    n_util = (ekv * epv) - (ekc * epc) - gastos
+                # Fila 2: Compra
+                st.markdown("**Datos Compra**")
+                cc1, cc2, cc3, cc4 = st.columns(4)
+                e_kgc = cc1.number_input("Kg Compra", value=float(row['Kg_Compra']), format="%.2f")
+                e_pc = cc2.number_input("Precio Compra", value=float(row['Precio_Compra']), format="%.2f")
+                e_plaza = cc3.number_input("Precio Plaza", value=float(row['Precio_Plaza']), format="%.2f")
+                e_fletes = cc4.number_input("Fletes", value=float(row.get('Fletes', 0.0)), format="%.2f")
+
+                # Fila 3: Venta
+                st.markdown("**Datos Venta**")
+                cv1, cv2, cv3, cv4 = st.columns(4)
+                e_kgv = cv1.number_input("Kg Venta", value=float(row['Kg_Venta']), format="%.2f")
+                e_pv = cv2.number_input("Precio Venta", value=float(row['Precio_Venta']), format="%.2f")
+                e_desc = cv3.number_input("Deducciones", value=float(row.get('Descuentos', 0.0)), format="%.2f")
+                e_est = cv4.selectbox("Estado Pago", ["Pagado", "Pendiente"], index=0 if row['Estado_Pago']=="Pagado" else 1)
+                
+                if st.form_submit_button("💾 Guardar Cambios Completos"):
+                    nu = (e_kgv * e_pv) - (e_kgc * e_pc) - e_fletes - e_desc
+                    
                     supabase.table("ventas_2026").update({
-                        "kg_compra": ekc, "precio_compra": epc, "kg_venta": ekv, "precio_venta": epv,
-                        "precio_plaza": epp, "estado_pago": eest, "utilidad": n_util
+                        "fecha": str(e_fecha), # Guarda la fecha que se muestra (la original o modificada)
+                        "cliente": e_cli, "proveedor": e_prov, "producto": e_prod,
+                        "kg_compra": e_kgc, "precio_compra": e_pc, "precio_plaza": e_plaza, "fletes": e_fletes,
+                        "kg_venta": e_kgv, "precio_venta": e_pv, "descuentos": e_desc,
+                        "estado_pago": e_est, "utilidad": nu
                     }).eq("id", int(row['ID'])).execute()
+                    
                     st.cache_data.clear()
+                    st.success("Registro actualizado correctamente.")
                     st.rerun()
-            if st.button("🗑️ Borrar"):
+            
+            if st.button("🗑️ Borrar Registro Definitivamente"):
                 supabase.table("ventas_2026").delete().eq("id", int(row['ID'])).execute()
                 st.cache_data.clear()
                 st.rerun()
+
 
 
 
