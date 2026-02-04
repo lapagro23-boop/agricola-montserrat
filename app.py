@@ -143,42 +143,30 @@ f_fin = st.sidebar.date_input("📅 Fin", date(2026, 12, 31))
 # CARGA DE DATOS
 df_v, df_g, saldo_inicial = cargar_datos()
 
-# --- LÓGICA DE CAJA (ANTES DE MOSTRAR SIDEBAR) ---
+# LOGICA CAJA
 ingresos_caja = 0
 egresos_caja = 0
-
 if not df_v.empty:
-    # Entradas: Solo Ventas PAGADAS
-    # Valor entrada = KgVenta * PrecioVenta (Bruto)
     ventas_pagadas = df_v[df_v['Estado_Pago'] == 'Pagado']
     ingresos_caja = (ventas_pagadas['Kg_Venta'] * ventas_pagadas['Precio_Venta']).sum()
-    
-    # Salidas: Compras + Fletes (TODOS, se asume contado)
     compras_total = (df_v['Kg_Compra'] * df_v['Precio_Compra']).sum()
     fletes_total = df_v['Fletes'].sum()
     egresos_caja += compras_total + fletes_total
-
 if not df_g.empty:
     egresos_caja += df_g['Monto'].sum()
-
-# Cálculo actual del sistema
 flujo_acumulado = ingresos_caja - egresos_caja
 caja_sistema = saldo_inicial + flujo_acumulado
 
-# CONFIGURACIÓN CAJA (Calibración)
+# CONFIG CAJA
 st.sidebar.divider()
 st.sidebar.subheader("💰 Calibrar Caja")
 with st.sidebar.form("config_caja"):
     st.caption(f"El sistema calcula: ${caja_sistema:,.0f}")
     valor_real_usuario = st.number_input("¿Cuánto tienes REALMENTE hoy?", value=float(caja_sistema), format="%.2f")
-    
     if st.form_submit_button("✅ Ajustar a Realidad"):
-        # Matemática inversa: Si Caja_Real = Base + Flujo
-        # Entonces: Nueva_Base = Caja_Real - Flujo
         nueva_base = valor_real_usuario - flujo_acumulado
         supabase.table("configuracion_caja").update({"saldo_inicial": nueva_base}).gt("id", 0).execute()
         st.cache_data.clear()
-        st.success("¡Caja Calibrada!")
         st.rerun()
 
 # FILTROS
@@ -206,7 +194,6 @@ with t1:
     vol = df_vf['Kg_Venta'].sum() if not df_vf.empty else 0
     
     c1, c2, c3 = st.columns(3)
-    # Mostramos la caja calibrada (que es igual a caja_sistema tras recargar)
     c1.metric("💰 CAJA REAL (DISPONIBLE)", f"${caja_sistema:,.0f}", delta="Efectivo en mano")
     c2.metric("Utilidad Periodo", f"${ub:,.0f}", delta="Rentabilidad")
     c3.metric("Volumen Movido", f"{vol:,.1f} Kg")
@@ -220,7 +207,6 @@ with t_ana:
         c1, c2 = st.columns([3,1])
         with c1:
             if not df_p.empty:
-                # Gráfica corregida y segura
                 fig = px.line(df_p, x='Fecha', y=['Precio_Compra', 'Precio_Plaza'], markers=True, title="Precios: Compra vs Plaza")
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("Faltan datos de plaza.")
@@ -343,16 +329,33 @@ with t3:
                 e_desc = cv3.number_input("Deducciones", value=float(row.get('Descuentos', 0.0)), format="%.2f")
                 e_est = cv4.selectbox("Estado Pago", ["Pagado", "Pendiente"], index=0 if row['Estado_Pago']=="Pagado" else 1)
                 
+                st.markdown("**Soportes (Opcional: Subir para reemplazar)**")
+                cf1, cf2 = st.columns(2)
+                # Aquí agregamos los cargadores de archivos nuevos
+                new_file_c = cf1.file_uploader("Nueva Factura Compra")
+                new_file_v = cf2.file_uploader("Nueva Factura Venta")
+
                 if st.form_submit_button("💾 Guardar Cambios Completos"):
                     nu = (e_kgv * e_pv) - (e_kgc * e_pc) - e_fletes - e_desc
                     
-                    supabase.table("ventas_2026").update({
+                    updates = {
                         "fecha": str(e_fecha),
                         "cliente": e_cli, "proveedor": e_prov, "producto": e_prod,
                         "kg_compra": e_kgc, "precio_compra": e_pc, "precio_plaza": e_plaza, "fletes": e_fletes,
                         "kg_venta": e_kgv, "precio_venta": e_pv, "descuentos": e_desc,
                         "estado_pago": e_est, "utilidad": nu
-                    }).eq("id", int(row['ID'])).execute()
+                    }
+
+                    # Lógica para subir archivos solo si el usuario cargó algo nuevo
+                    if new_file_c:
+                        url_c = subir_archivo(new_file_c, f"edit_c_{e_prov}")
+                        if url_c: updates["fec_doc_url"] = url_c
+                    
+                    if new_file_v:
+                        url_v = subir_archivo(new_file_v, f"edit_v_{e_cli}")
+                        if url_v: updates["fev_doc_url"] = url_v
+
+                    supabase.table("ventas_2026").update(updates).eq("id", int(row['ID'])).execute()
                     
                     st.cache_data.clear()
                     st.success("Registro actualizado correctamente.")
