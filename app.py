@@ -24,7 +24,6 @@ st.markdown("""
         padding: 10px 20px; font-weight: bold;
     }
     .stButton>button:hover { background-color: #1b5e20; color: white; }
-    [data-testid="stSidebar"] { background-color: #ffffff; border-right: 1px solid #e0e0e0; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -50,23 +49,35 @@ except:
 
 # --- FUNCIONES ---
 def limpiar_nombre(nombre):
+    # Quita acentos y caracteres especiales
     nombre = unicodedata.normalize('NFKD', nombre).encode('ASCII', 'ignore').decode('utf-8')
-    nombre = nombre.replace(" ", "_")
-    return re.sub(r'[^\w.-]', '', nombre)
+    # Reemplaza todo lo que no sea letra o número por guion bajo
+    nombre = re.sub(r'[^\w]', '_', nombre)
+    return nombre
 
 def subir_archivo(archivo, nombre_base):
     if archivo:
         try:
+            # Limpieza extrema del nombre
             ext = archivo.name.split('.')[-1]
-            path = f"{limpiar_nombre(nombre_base)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{ext}"
+            nombre_clean = limpiar_nombre(nombre_base)
+            # Timestamp corto para evitar nombres kilométricos
+            ts = datetime.now().strftime('%m%d_%H%M')
+            path = f"{nombre_clean}_{ts}.{ext}"
+            
+            # Subida
             supabase.storage.from_(BUCKET_FACTURAS).upload(path, archivo.getvalue(), {"content-type": archivo.type, "upsert": "true"})
+            
+            # Obtener URL Pública LIMPIA
             return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(path)
-        except: return None
+        except Exception as e:
+            st.error(f"Error subiendo: {e}")
+            return None
     return None
 
 @st.cache_data(ttl=5) 
 def cargar_datos():
-    # 1. Ventas
+    # Ventas
     df_v = pd.DataFrame()
     try:
         res = supabase.table("ventas_2026").select("*").order("fecha", desc=True).execute()
@@ -82,24 +93,24 @@ def cargar_datos():
             }
             df_v = df_v.rename(columns={k: v for k, v in cols.items() if k in df_v.columns})
             df_v['Fecha'] = pd.to_datetime(df_v['Fecha'])
+            # Asegurar columnas numéricas
             for c in ['Kg_Compra','Precio_Compra','Fletes','Kg_Venta','Precio_Venta','Descuentos','Utilidad','Precio_Plaza']:
                 if c in df_v.columns: df_v[c] = pd.to_numeric(df_v[c]).fillna(0.0)
     except: pass
 
-    # 2. Movimientos Caja (Antiguos Gastos)
+    # Gastos
     df_g = pd.DataFrame()
     try:
         res_g = supabase.table("gastos_fijos_2026").select("*").order("fecha", desc=True).execute()
         df_g = pd.DataFrame(res_g.data)
         if not df_g.empty:
-            # Ahora traemos 'tipo' también
             df_g = df_g.rename(columns={'id': 'ID', 'fecha': 'Fecha', 'concepto': 'Concepto', 'monto': 'Monto', 'tipo': 'Tipo'})
             df_g['Fecha'] = pd.to_datetime(df_g['Fecha'])
             df_g['Monto'] = pd.to_numeric(df_g['Monto']).fillna(0.0)
-            if 'Tipo' not in df_g.columns: df_g['Tipo'] = 'Gasto' # Default para datos viejos
+            if 'Tipo' not in df_g.columns: df_g['Tipo'] = 'Gasto'
     except: pass
 
-    # 3. Saldo Inicial
+    # Saldo Inicial
     saldo_ini = 0.0
     try:
         res_c = supabase.table("configuracion_caja").select("saldo_inicial").limit(1).execute()
@@ -138,36 +149,24 @@ st.sidebar.divider()
 f_ini = st.sidebar.date_input("📅 Inicio", date(2026, 1, 1))
 f_fin = st.sidebar.date_input("📅 Fin", date(2026, 12, 31))
 
-# CARGA DATOS
+# CARGA
 df_v, df_g, saldo_inicial = cargar_datos()
 
-# --- LÓGICA FINANCIERA ---
+# CÁLCULOS
 ingresos_caja = 0
 egresos_caja = 0
-gastos_operativos_total = 0
-
 if not df_v.empty:
-    # 1. Operación Fruta
     ventas_pagadas = df_v[df_v['Estado_Pago'] == 'Pagado']
     ingresos_caja += (ventas_pagadas['Kg_Venta'] * ventas_pagadas['Precio_Venta']).sum()
-    
     compras_total = (df_v['Kg_Compra'] * df_v['Precio_Compra']).sum()
     fletes_total = df_v['Fletes'].sum()
     egresos_caja += compras_total + fletes_total
 
 if not df_g.empty:
-    # 2. Movimientos Extra
-    # Gasto: Resta Caja, Resta Utilidad
     gastos = df_g[df_g['Tipo'] == 'Gasto']
-    gastos_val = gastos['Monto'].sum()
-    egresos_caja += gastos_val
-    gastos_operativos_total = gastos_val
-
-    # Préstamo Salida: Resta Caja, NO afecta Utilidad
+    egresos_caja += gastos['Monto'].sum()
     prestamos_out = df_g[df_g['Tipo'] == 'Préstamo Salida']
     egresos_caja += prestamos_out['Monto'].sum()
-
-    # Ingreso Extra: Suma Caja, NO afecta Utilidad Operativa (o podríamos separarlo)
     ingresos_in = df_g[df_g['Tipo'] == 'Ingreso Extra']
     ingresos_caja += ingresos_in['Monto'].sum()
 
@@ -202,26 +201,20 @@ if not df_v.empty:
         if not urg.empty: st.error(f"🔔 Tienes {len(urg)} facturas críticas por cobrar.")
 
 # PESTAÑAS
-t1, t_ana, t_mov, t2, t3 = st.tabs(["📊 Dashboard", "📈 Analítica", "💸 Movimientos (Caja)", "🧮 Nueva Op.", "🚦 Cartera"])
+t1, t_ana, t_mov, t2, t3 = st.tabs(["📊 Dashboard", "📈 Analítica", "💸 Movimientos", "🧮 Nueva Op.", "🚦 Cartera"])
 
 # --- DASHBOARD ---
 with t1:
     st.subheader("Estado Financiero")
-    # Utilidad = (Ventas - Compras - Fletes) - GASTOS OPERATIVOS (No préstamos)
-    util_bruta_viajes = df_vf['Utilidad'].sum() if not df_vf.empty else 0
-    
-    # Filtramos gastos operativos del rango de fechas
+    ub = df_vf['Utilidad'].sum() if not df_vf.empty else 0
     gastos_per = df_gf[df_gf['Tipo'] == 'Gasto']['Monto'].sum() if not df_gf.empty else 0
-    
-    util_neta = util_bruta_viajes - gastos_per
+    un = ub - gastos_per
     vol = df_vf['Kg_Venta'].sum() if not df_vf.empty else 0
     
     c1, c2, c3 = st.columns(3)
-    c1.metric("💰 CAJA REAL", f"${caja_sistema:,.0f}", delta="Efectivo Disponible")
-    c2.metric("Utilidad Neta", f"${util_neta:,.0f}", delta="Ganancia Real (Sin gastos)")
+    c1.metric("💰 CAJA REAL", f"${caja_sistema:,.0f}", delta="Disponible")
+    c2.metric("Utilidad Neta", f"${un:,.0f}", delta="Real")
     c3.metric("Volumen", f"{vol:,.1f} Kg")
-    
-    st.info("ℹ️ **Nota:** Los 'Préstamos' afectan la Caja pero NO reducen tu Utilidad Neta.")
 
 # --- ANALÍTICA ---
 with t_ana:
@@ -238,38 +231,30 @@ with t_ana:
                 ahorro = df_p['Precio_Plaza'].mean() - df_p['Precio_Compra'].mean()
                 st.metric("Margen vs Plaza", f"${ahorro:,.0f}", delta="Ahorro/Kg" if ahorro>0 else "Sobrecosto")
 
-# --- MOVIMIENTOS CAJA ---
+# --- MOVIMIENTOS ---
 with t_mov:
     st.subheader("💸 Registro de Movimientos")
     with st.form("add_mov", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         fm = c1.date_input("Fecha", date.today())
-        cm = c2.text_input("Concepto / Comentario")
-        tm = c3.selectbox("Tipo", ["Gasto (Gasolina/Nómina)", "Préstamo Salida (Prestar)", "Ingreso Extra (Devolución/Aporte)"])
+        cm = c2.text_input("Concepto")
+        tm = c3.selectbox("Tipo", ["Gasto (Gasolina/Nómina)", "Préstamo Salida", "Ingreso Extra"])
         mm = c4.number_input("Valor ($)", min_value=0.0, format="%.2f")
         
         if st.form_submit_button("Registrar"):
             tipo_db = "Gasto"
             if "Préstamo" in tm: tipo_db = "Préstamo Salida"
             elif "Ingreso" in tm: tipo_db = "Ingreso Extra"
-            
             if cm and mm > 0:
                 supabase.table("gastos_fijos_2026").insert({"fecha": str(fm), "concepto": cm, "monto": mm, "tipo": tipo_db}).execute()
                 st.cache_data.clear()
                 st.rerun()
 
     if not df_gf.empty:
-        # Colorear fila según tipo
-        def color_mov(row):
-            if row['Tipo'] == 'Gasto': return ['background-color: #ffebee']*len(row) # Rojo claro
-            if row['Tipo'] == 'Préstamo Salida': return ['background-color: #e3f2fd']*len(row) # Azul claro
-            if row['Tipo'] == 'Ingreso Extra': return ['background-color: #e8f5e9']*len(row) # Verde claro
-            return ['']*len(row)
-
-        st.dataframe(df_gf.style.apply(color_mov, axis=1).format({"Monto": "${:,.2f}"}), use_container_width=True, hide_index=True)
-        with st.expander("Borrar Movimiento"):
+        st.dataframe(df_gf.style.format({"Monto": "${:,.2f}"}), use_container_width=True, hide_index=True)
+        with st.expander("Borrar"):
             idg = st.number_input("ID a borrar", step=1)
-            if st.button("Eliminar"):
+            if st.button("Eliminar Movimiento"):
                 supabase.table("gastos_fijos_2026").delete().eq("id", idg).execute()
                 st.cache_data.clear()
                 st.rerun()
