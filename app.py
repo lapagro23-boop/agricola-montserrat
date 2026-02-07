@@ -49,26 +49,23 @@ except:
 
 # --- FUNCIONES ---
 def limpiar_nombre(nombre):
-    # Quita acentos y caracteres especiales
+    # Quita acentos y caracteres especiales, deja solo letras, numeros y guion bajo
     nombre = unicodedata.normalize('NFKD', nombre).encode('ASCII', 'ignore').decode('utf-8')
-    # Reemplaza todo lo que no sea letra o número por guion bajo
     nombre = re.sub(r'[^\w]', '_', nombre)
     return nombre
 
 def subir_archivo(archivo, nombre_base):
     if archivo:
         try:
-            # Limpieza extrema del nombre
             ext = archivo.name.split('.')[-1]
             nombre_clean = limpiar_nombre(nombre_base)
-            # Timestamp corto para evitar nombres kilométricos
             ts = datetime.now().strftime('%m%d_%H%M')
             path = f"{nombre_clean}_{ts}.{ext}"
             
             # Subida
             supabase.storage.from_(BUCKET_FACTURAS).upload(path, archivo.getvalue(), {"content-type": archivo.type, "upsert": "true"})
             
-            # Obtener URL Pública LIMPIA
+            # URL Pública
             return supabase.storage.from_(BUCKET_FACTURAS).get_public_url(path)
         except Exception as e:
             st.error(f"Error subiendo: {e}")
@@ -93,9 +90,14 @@ def cargar_datos():
             }
             df_v = df_v.rename(columns={k: v for k, v in cols.items() if k in df_v.columns})
             df_v['Fecha'] = pd.to_datetime(df_v['Fecha'])
-            # Asegurar columnas numéricas
+            # Limpieza de numéricos
             for c in ['Kg_Compra','Precio_Compra','Fletes','Kg_Venta','Precio_Venta','Descuentos','Utilidad','Precio_Plaza']:
                 if c in df_v.columns: df_v[c] = pd.to_numeric(df_v[c]).fillna(0.0)
+            
+            # Limpieza de URLs (Asegurar que sean None si están vacías)
+            for c in ['FEC_Doc', 'FEV_Doc']:
+                if c in df_v.columns:
+                    df_v[c] = df_v[c].replace({'': None, 'None': None, 'nan': None})
     except: pass
 
     # Gastos
@@ -110,7 +112,7 @@ def cargar_datos():
             if 'Tipo' not in df_g.columns: df_g['Tipo'] = 'Gasto'
     except: pass
 
-    # Saldo Inicial
+    # Saldo
     saldo_ini = 0.0
     try:
         res_c = supabase.table("configuracion_caja").select("saldo_inicial").limit(1).execute()
@@ -149,7 +151,6 @@ st.sidebar.divider()
 f_ini = st.sidebar.date_input("📅 Inicio", date(2026, 1, 1))
 f_fin = st.sidebar.date_input("📅 Fin", date(2026, 12, 31))
 
-# CARGA
 df_v, df_g, saldo_inicial = cargar_datos()
 
 # CÁLCULOS
