@@ -1,11 +1,9 @@
 """
-Sistema de Gestión Agrícola Montserrat - Versión Refactorizada
-Mejoras implementadas:
-- Validación completa de datos de entrada
-- Manejo robusto de excepciones con logging
-- Código modularizado y documentado
-- Optimización de caché
-- Validación de archivos
+Sistema de Gestión Agrícola Montserrat - Versión Corregida
+Fórmula de utilidad ajustada para coincidir con Google Sheet:
+- Costo Neto = (Kg_Compra × Precio_Compra) + Viáticos + Flete + Otros_Gastos
+- Utilidad Bruta = (Kg_Venta × Precio_Venta) - Costo_Neto
+- Utilidad Neta = Utilidad_Bruta - Retenciones - Descuentos
 """
 
 import streamlit as st
@@ -28,12 +26,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Constantes de configuración
-CACHE_TTL_SECONDS = 300  # 5 minutos (reducido de 5s para menor carga en DB)
+CACHE_TTL_SECONDS = 300  # 5 minutos
 DEFAULT_CREDITO_DIAS = 8
 ALLOWED_FILE_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg'}
 MAX_FILE_SIZE_MB = 5
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
-PAGE_SIZE = 50  # Para paginación de tablas
+PAGE_SIZE = 50
 
 # Configuración de página
 st.set_page_config(
@@ -83,12 +81,13 @@ def validar_cantidad(valor, nombre_campo, permitir_cero=False):
     if permitir_cero and valor < 0:
         return False, f"{nombre_campo} no puede ser negativo"
     
-    if valor > 1000000:  # Límite razonable
+    if valor > 1000000:
         return False, f"{nombre_campo} excede el límite permitido"
     
     return True, ""
 
-def validar_operacion_comercial(kg_compra, precio_compra, kg_venta, precio_venta, fletes, descuentos):
+def validar_operacion_comercial(kg_compra, precio_compra, kg_venta, precio_venta, 
+                                viaticos, fletes, otros_gastos, retenciones, descuentos):
     """
     Valida la coherencia de una operación comercial completa.
     
@@ -104,7 +103,10 @@ def validar_operacion_comercial(kg_compra, precio_compra, kg_venta, precio_venta
         (precio_compra, "Precio Compra"),
         (kg_venta, "Kg Venta"),
         (precio_venta, "Precio Venta"),
+        (viaticos, "Viáticos", True),
         (fletes, "Fletes", True),
+        (otros_gastos, "Otros Gastos", True),
+        (retenciones, "Retenciones", True),
         (descuentos, "Descuentos", True)
     ]
     
@@ -118,13 +120,13 @@ def validar_operacion_comercial(kg_compra, precio_compra, kg_venta, precio_venta
         return False, advertencias, errores
     
     # Validaciones de lógica de negocio
-    if kg_venta > kg_compra * 1.1:  # 10% de tolerancia por diferencias de peso
+    if kg_venta > kg_compra * 1.1:
         advertencias.append(
             f"⚠️ Vendes {kg_venta - kg_compra:.2f} kg más de lo que compraste. "
             "Verifica si hay stock previo."
         )
     
-    if precio_venta < precio_compra * 0.9:  # Margen negativo significativo
+    if precio_venta < precio_compra * 0.9:
         margen = ((precio_venta - precio_compra) / precio_compra) * 100
         advertencias.append(
             f"⚠️ Pérdida en precio: vendes a ${precio_venta:,.0f} "
@@ -132,10 +134,13 @@ def validar_operacion_comercial(kg_compra, precio_compra, kg_venta, precio_venta
         )
     
     # Calcular utilidad
-    utilidad = calcular_utilidad(kg_venta, precio_venta, kg_compra, precio_compra, fletes, descuentos)
+    utilidad_neta = calcular_utilidad_neta(
+        kg_venta, precio_venta, kg_compra, precio_compra, 
+        viaticos, fletes, otros_gastos, retenciones, descuentos
+    )
     
-    if utilidad < 0:
-        advertencias.append(f"💰 Utilidad negativa: ${utilidad:,.0f}")
+    if utilidad_neta < 0:
+        advertencias.append(f"💰 Utilidad neta negativa: ${utilidad_neta:,.0f}")
     
     return True, advertencias, errores
 
@@ -150,7 +155,7 @@ def validar_archivo(archivo):
         tuple: (es_valido: bool, mensaje_error: str)
     """
     if not archivo:
-        return True, ""  # Archivo opcional
+        return True, ""
     
     # Validar extensión
     ext = archivo.name.split('.')[-1].lower()
@@ -158,9 +163,9 @@ def validar_archivo(archivo):
         return False, f"Formato no permitido. Usa: {', '.join(ALLOWED_FILE_EXTENSIONS)}"
     
     # Validar tamaño
-    archivo.seek(0, 2)  # Ir al final del archivo
+    archivo.seek(0, 2)
     size = archivo.tell()
-    archivo.seek(0)  # Volver al inicio
+    archivo.seek(0)
     
     if size > MAX_FILE_SIZE_BYTES:
         return False, f"Archivo muy grande ({size/1024/1024:.1f}MB). Máximo: {MAX_FILE_SIZE_MB}MB"
@@ -169,55 +174,66 @@ def validar_archivo(archivo):
 
 # ==================== FUNCIONES DE NEGOCIO ====================
 
-def calcular_utilidad(kg_venta, precio_venta, kg_compra, precio_compra, fletes, descuentos):
+def calcular_utilidad_neta(kg_venta, precio_venta, kg_compra, precio_compra, 
+                          viaticos, fletes, otros_gastos, retenciones, descuentos):
     """
-    Calcula la utilidad neta de una operación comercial.
+    Calcula la utilidad neta según la fórmula del Google Sheet.
+    
+    Fórmula:
+    - Costo Neto = (Kg_Compra × Precio_Compra) + Viáticos + Flete + Otros_Gastos
+    - Utilidad Bruta = (Kg_Venta × Precio_Venta) - Costo_Neto
+    - Utilidad Neta = Utilidad_Bruta - Retenciones - Descuentos
     
     Args:
         kg_venta: Kilogramos vendidos
         precio_venta: Precio por kg de venta
         kg_compra: Kilogramos comprados
         precio_compra: Precio por kg de compra
+        viaticos: Gastos de viáticos
         fletes: Costos de transporte
-        descuentos: Deducciones aplicadas
+        otros_gastos: Otros gastos operativos
+        retenciones: Retenciones aplicadas
+        descuentos: Deducciones/descuentos
         
     Returns:
         float: Utilidad neta (puede ser negativa si hay pérdida)
     """
-    ingreso_bruto = kg_venta * precio_venta
-    costo_total = (kg_compra * precio_compra) + fletes + descuentos
-    return ingreso_bruto - costo_total
+    # Calcular costo neto
+    costo_bruto = kg_compra * precio_compra
+    costo_neto = costo_bruto + viaticos + fletes + otros_gastos
+    
+    # Calcular utilidad bruta
+    ingreso_total = kg_venta * precio_venta
+    utilidad_bruta = ingreso_total - costo_neto
+    
+    # Calcular utilidad neta
+    utilidad_neta = utilidad_bruta - retenciones - descuentos
+    
+    return utilidad_neta
+
+def calcular_utilidad_bruta(kg_venta, precio_venta, kg_compra, precio_compra, 
+                           viaticos, fletes, otros_gastos):
+    """
+    Calcula solo la utilidad bruta.
+    
+    Returns:
+        float: Utilidad bruta
+    """
+    costo_neto = (kg_compra * precio_compra) + viaticos + fletes + otros_gastos
+    ingreso_total = kg_venta * precio_venta
+    return ingreso_total - costo_neto
 
 def limpiar_nombre_archivo(nombre):
     """
     Limpia nombre de archivo removiendo caracteres especiales.
-    
-    Args:
-        nombre: Nombre original del archivo
-        
-    Returns:
-        str: Nombre limpio con solo letras, números y guiones bajos
     """
-    # Remover acentos
     nombre = unicodedata.normalize('NFKD', nombre).encode('ASCII', 'ignore').decode('utf-8')
-    # Reemplazar caracteres especiales con guion bajo
     nombre = re.sub(r'[^\w]', '_', nombre)
     return nombre
 
 def color_deuda(row):
     """
-    Aplica colores condicionales a filas de dataframe según estado de pago.
-    
-    Args:
-        row: Fila de pandas DataFrame con columnas 'Estado_Pago', 'Fecha', 'Dias_Credito'
-        
-    Returns:
-        list: Lista de estilos CSS para cada celda
-        
-    Colores aplicados:
-        - Verde: Pagado
-        - Amarillo: Vence en ≤3 días
-        - Rojo: Vencido
+    Aplica colores condicionales a filas según estado de pago.
     """
     color = ''
     try:
@@ -240,14 +256,6 @@ def color_deuda(row):
 def obtener_opciones(df, columna, valores_default):
     """
     Obtiene lista única de opciones combinando valores existentes con defaults.
-    
-    Args:
-        df: DataFrame de pandas
-        columna: Nombre de la columna
-        valores_default: Lista de valores predeterminados
-        
-    Returns:
-        list: Lista ordenada de opciones únicas
     """
     existentes = df[columna].unique().tolist() if not df.empty and columna in df.columns else []
     todas = list(set(valores_default + [x for x in existentes if x]))
@@ -258,41 +266,27 @@ def obtener_opciones(df, columna, valores_default):
 def subir_archivo(archivo, nombre_base):
     """
     Sube un archivo a Supabase Storage con validación.
-    
-    Args:
-        archivo: Objeto de archivo de Streamlit
-        nombre_base: Nombre base para el archivo (se limpiará)
-        
-    Returns:
-        str: URL pública del archivo o None si falla
     """
     if not archivo:
         return None
     
-    # Validar archivo
     es_valido, mensaje_error = validar_archivo(archivo)
     if not es_valido:
         st.error(f"❌ {mensaje_error}")
         return None
     
     try:
-        # Preparar nombre de archivo
         ext = archivo.name.split('.')[-1].lower()
         nombre_limpio = limpiar_nombre_archivo(nombre_base)
         timestamp = datetime.now().strftime('%m%d_%H%M')
         nombre_archivo = f"{nombre_limpio}_{timestamp}.{ext}"
         
-        # Subir archivo
         supabase.storage.from_(BUCKET_FACTURAS).upload(
             nombre_archivo,
             archivo.getvalue(),
-            {
-                "content-type": archivo.type,
-                "upsert": "true"
-            }
+            {"content-type": archivo.type, "upsert": "true"}
         )
         
-        # Obtener URL pública
         url_publica = supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
         logger.info(f"Archivo subido exitosamente: {nombre_archivo}")
         return url_publica
@@ -306,25 +300,21 @@ def subir_archivo(archivo, nombre_base):
 def cargar_datos():
     """
     Carga datos de ventas, gastos y configuración desde Supabase.
-    
-    Returns:
-        tuple: (df_ventas, df_gastos, saldo_inicial)
     """
-    # Cargar ventas
     df_ventas = pd.DataFrame()
     try:
         respuesta = supabase.table("ventas_2026").select("*").order("fecha", desc=True).execute()
         df_ventas = pd.DataFrame(respuesta.data)
         
         if not df_ventas.empty:
-            # Renombrar columnas
             columnas_mapa = {
                 'id': 'ID', 'fecha': 'Fecha', 'producto': 'Producto', 
                 'proveedor': 'Proveedor', 'cliente': 'Cliente',
                 'fec_doc_url': 'FEC_Doc', 'fev_doc_url': 'FEV_Doc',
                 'kg_compra': 'Kg_Compra', 'precio_compra': 'Precio_Compra',
-                'fletes': 'Fletes', 'kg_venta': 'Kg_Venta',
-                'precio_venta': 'Precio_Venta', 'descuentos': 'Descuentos',
+                'viaticos': 'Viaticos', 'fletes': 'Fletes', 'otros_gastos': 'Otros_Gastos',
+                'kg_venta': 'Kg_Venta', 'precio_venta': 'Precio_Venta',
+                'retenciones': 'Retenciones', 'descuentos': 'Descuentos',
                 'utilidad': 'Utilidad', 'estado_pago': 'Estado_Pago',
                 'dias_credito': 'Dias_Credito', 'precio_plaza': 'Precio_Plaza'
             }
@@ -332,30 +322,25 @@ def cargar_datos():
                 columns={k: v for k, v in columnas_mapa.items() if k in df_ventas.columns}
             )
             
-            # Convertir tipos
             df_ventas['Fecha'] = pd.to_datetime(df_ventas['Fecha'])
             
-            # Limpiar campos numéricos
             campos_numericos = [
-                'Kg_Compra', 'Precio_Compra', 'Fletes', 'Kg_Venta',
-                'Precio_Venta', 'Descuentos', 'Utilidad', 'Precio_Plaza'
+                'Kg_Compra', 'Precio_Compra', 'Viaticos', 'Fletes', 'Otros_Gastos',
+                'Kg_Venta', 'Precio_Venta', 'Retenciones', 'Descuentos', 
+                'Utilidad', 'Precio_Plaza'
             ]
             for campo in campos_numericos:
                 if campo in df_ventas.columns:
                     df_ventas[campo] = pd.to_numeric(df_ventas[campo], errors='coerce').fillna(0.0)
             
-            # Limpiar URLs
             for campo in ['FEC_Doc', 'FEV_Doc']:
                 if campo in df_ventas.columns:
-                    df_ventas[campo] = df_ventas[campo].replace(
-                        {'': None, 'None': None, 'nan': None}
-                    )
+                    df_ventas[campo] = df_ventas[campo].replace({'': None, 'None': None, 'nan': None})
                     
     except Exception as e:
         logger.error(f"Error al cargar ventas: {e}")
         st.error(f"⚠️ Error al cargar ventas: {str(e)}")
     
-    # Cargar gastos
     df_gastos = pd.DataFrame()
     try:
         respuesta_gastos = supabase.table("gastos_fijos_2026").select("*").order("fecha", desc=True).execute()
@@ -376,7 +361,6 @@ def cargar_datos():
         logger.error(f"Error al cargar gastos: {e}")
         st.error(f"⚠️ Error al cargar gastos: {str(e)}")
     
-    # Cargar saldo inicial
     saldo_inicial = 0.0
     try:
         respuesta_config = supabase.table("configuracion_caja").select("saldo_inicial").limit(1).execute()
@@ -432,7 +416,6 @@ st.markdown("# 🍌 Agrícola Montserrat")
 st.markdown("### _Sistema de Gestión Integral 2026_")
 st.divider()
 
-# Barra lateral
 st.sidebar.title("Menú")
 if st.sidebar.button("🔄 Actualizar Datos"):
     cargar_datos.clear()
@@ -440,11 +423,9 @@ if st.sidebar.button("🔄 Actualizar Datos"):
 
 st.sidebar.divider()
 
-# Filtros de fecha
 fecha_inicio = st.sidebar.date_input("📅 Inicio", date(2026, 1, 1))
 fecha_fin = st.sidebar.date_input("📅 Fin", date(2026, 12, 31))
 
-# Cargar datos
 df_ventas, df_gastos, saldo_inicial = cargar_datos()
 
 # ==================== CÁLCULOS FINANCIEROS ====================
@@ -452,17 +433,17 @@ df_ventas, df_gastos, saldo_inicial = cargar_datos()
 ingresos_caja = 0.0
 egresos_caja = 0.0
 
-# Calcular ingresos de ventas pagadas
 if not df_ventas.empty:
     ventas_pagadas = df_ventas[df_ventas['Estado_Pago'] == 'Pagado']
     ingresos_caja += (ventas_pagadas['Kg_Venta'] * ventas_pagadas['Precio_Venta']).sum()
     
-    # Calcular egresos de compras y fletes
-    compras_total = (df_ventas['Kg_Compra'] * df_ventas['Precio_Compra']).sum()
+    # Egresos: Costo Neto de todas las operaciones
+    costo_bruto = (df_ventas['Kg_Compra'] * df_ventas['Precio_Compra']).sum()
+    viaticos_total = df_ventas['Viaticos'].sum() if 'Viaticos' in df_ventas.columns else 0
     fletes_total = df_ventas['Fletes'].sum()
-    egresos_caja += compras_total + fletes_total
+    otros_total = df_ventas['Otros_Gastos'].sum() if 'Otros_Gastos' in df_ventas.columns else 0
+    egresos_caja += costo_bruto + viaticos_total + fletes_total + otros_total
 
-# Procesar gastos y otros movimientos
 if not df_gastos.empty:
     gastos_operativos = df_gastos[df_gastos['Tipo'] == 'Gasto']
     egresos_caja += gastos_operativos['Monto'].sum()
@@ -473,7 +454,6 @@ if not df_gastos.empty:
     ingresos_extra = df_gastos[df_gastos['Tipo'] == 'Ingreso Extra']
     ingresos_caja += ingresos_extra['Monto'].sum()
 
-# Calcular flujo y caja final
 flujo_acumulado = ingresos_caja - egresos_caja
 caja_sistema = saldo_inicial + flujo_acumulado
 
@@ -484,18 +464,12 @@ st.sidebar.subheader("💰 Calibrar Caja")
 
 with st.sidebar.form("config_caja"):
     st.caption(f"Sistema: ${caja_sistema:,.0f}")
-    valor_real = st.number_input(
-        "Realidad HOY:",
-        value=float(caja_sistema),
-        format="%.2f"
-    )
+    valor_real = st.number_input("Realidad HOY:", value=float(caja_sistema), format="%.2f")
     
     if st.form_submit_button("✅ Ajustar"):
         try:
             nueva_base = valor_real - flujo_acumulado
-            supabase.table("configuracion_caja").update(
-                {"saldo_inicial": nueva_base}
-            ).gt("id", 0).execute()
+            supabase.table("configuracion_caja").update({"saldo_inicial": nueva_base}).gt("id", 0).execute()
             cargar_datos.clear()
             st.success("✅ Caja ajustada exitosamente")
             st.rerun()
@@ -503,15 +477,13 @@ with st.sidebar.form("config_caja"):
             logger.error(f"Error al ajustar caja: {e}")
             st.error(f"❌ Error al ajustar: {str(e)}")
 
-# ==================== FILTROS DE DATOS ====================
+# ==================== FILTROS ====================
 
-# Filtrar ventas por rango de fechas
 df_ventas_filtradas = df_ventas[
     (df_ventas['Fecha'].dt.date >= fecha_inicio) &
     (df_ventas['Fecha'].dt.date <= fecha_fin)
 ].copy() if not df_ventas.empty else pd.DataFrame()
 
-# Filtrar gastos por rango de fechas
 df_gastos_filtrados = df_gastos[
     (df_gastos['Fecha'].dt.date >= fecha_inicio) &
     (df_gastos['Fecha'].dt.date <= fecha_fin)
@@ -523,14 +495,8 @@ if not df_ventas.empty:
     pendientes = df_ventas[df_ventas['Estado_Pago'] == 'Pendiente'].copy()
     
     if not pendientes.empty:
-        pendientes['Dias_Credito'] = pd.to_numeric(
-            pendientes['Dias_Credito'],
-            errors='coerce'
-        ).fillna(0)
-        pendientes['Vence'] = pendientes['Fecha'] + pd.to_timedelta(
-            pendientes['Dias_Credito'],
-            unit='D'
-        )
+        pendientes['Dias_Credito'] = pd.to_numeric(pendientes['Dias_Credito'], errors='coerce').fillna(0)
+        pendientes['Vence'] = pendientes['Fecha'] + pd.to_timedelta(pendientes['Dias_Credito'], unit='D')
         
         hoy = pd.Timestamp.now().normalize()
         dias_hasta_vencimiento = (pendientes['Vence'] - hoy).dt.days
@@ -616,14 +582,12 @@ with tab_movimientos:
         monto_mov = col4.number_input("Valor ($)", min_value=0.0, format="%.2f")
         
         if st.form_submit_button("Registrar"):
-            # Mapear tipo para base de datos
             tipo_db = "Gasto"
             if "Préstamo" in tipo_mov:
                 tipo_db = "Préstamo Salida"
             elif "Ingreso" in tipo_mov:
                 tipo_db = "Ingreso Extra"
             
-            # Validar datos
             if not concepto_mov:
                 st.error("❌ El concepto es obligatorio")
             elif monto_mov <= 0:
@@ -643,7 +607,6 @@ with tab_movimientos:
                     logger.error(f"Error al registrar movimiento: {e}")
                     st.error(f"❌ Error: {str(e)}")
     
-    # Mostrar tabla de movimientos
     if not df_gastos_filtrados.empty:
         st.dataframe(
             df_gastos_filtrados.style.format({"Monto": "${:,.2f}"}),
@@ -694,62 +657,83 @@ with tab_nueva_op:
         with col_compra:
             st.markdown("##### 🛒 Compra")
             kg_compra = st.number_input("Kg Compra", min_value=0.0, format="%.2f")
-            precio_compra = st.number_input("Precio Compra", min_value=0.0, format="%.2f")
-            precio_plaza = st.number_input("Precio Plaza", min_value=0.0, format="%.2f")
-            fletes = st.number_input("Fletes", min_value=0.0, format="%.2f")
+            precio_compra = st.number_input("Precio Compra ($/kg)", min_value=0.0, format="%.2f")
+            precio_plaza = st.number_input("Precio Plaza ($/kg)", min_value=0.0, format="%.2f")
+            
+            st.markdown("**Costos Adicionales**")
+            cc1, cc2, cc3 = st.columns(3)
+            viaticos = cc1.number_input("Viáticos", min_value=0.0, format="%.2f")
+            fletes = cc2.number_input("Fletes", min_value=0.0, format="%.2f")
+            otros_gastos = cc3.number_input("Otros Gastos", min_value=0.0, format="%.2f")
+            
             file_compra = st.file_uploader("Factura Compra", type=list(ALLOWED_FILE_EXTENSIONS))
         
         with col_venta:
             st.markdown("##### 🤝 Venta")
             kg_venta = st.number_input("Kg Venta", min_value=0.0, format="%.2f")
-            precio_venta = st.number_input("Precio Venta", min_value=0.0, format="%.2f")
-            descuentos = st.number_input("Deducciones", min_value=0.0, format="%.2f")
+            precio_venta = st.number_input("Precio Venta ($/kg)", min_value=0.0, format="%.2f")
+            
+            st.markdown("**Deducciones**")
+            cv1, cv2 = st.columns(2)
+            retenciones = cv1.number_input("Retenciones", min_value=0.0, format="%.2f")
+            descuentos = cv2.number_input("Descuentos", min_value=0.0, format="%.2f")
+            
             file_venta = st.file_uploader("Factura Venta", type=list(ALLOWED_FILE_EXTENSIONS))
         
-        # Calcular utilidad estimada
-        utilidad_estimada = calcular_utilidad(
-            kg_venta, precio_venta, kg_compra, precio_compra, fletes, descuentos
+        # Calcular utilidades
+        utilidad_bruta_calc = calcular_utilidad_bruta(
+            kg_venta, precio_venta, kg_compra, precio_compra, 
+            viaticos, fletes, otros_gastos
+        )
+        utilidad_neta_calc = calcular_utilidad_neta(
+            kg_venta, precio_venta, kg_compra, precio_compra,
+            viaticos, fletes, otros_gastos, retenciones, descuentos
         )
         
-        # Mostrar utilidad con color
-        if utilidad_estimada >= 0:
-            st.success(f"💰 Utilidad Estimada: ${utilidad_estimada:,.2f}")
-        else:
-            st.error(f"⚠️ Pérdida Estimada: ${abs(utilidad_estimada):,.2f}")
+        # Mostrar cálculos
+        col_calc1, col_calc2 = st.columns(2)
+        with col_calc1:
+            costo_neto = (kg_compra * precio_compra) + viaticos + fletes + otros_gastos
+            st.info(f"💵 Costo Neto: ${costo_neto:,.0f}")
+            if utilidad_bruta_calc >= 0:
+                st.success(f"📊 Utilidad Bruta: ${utilidad_bruta_calc:,.0f}")
+            else:
+                st.error(f"📊 Pérdida Bruta: ${abs(utilidad_bruta_calc):,.0f}")
+        
+        with col_calc2:
+            if utilidad_neta_calc >= 0:
+                st.success(f"💰 Utilidad Neta: ${utilidad_neta_calc:,.0f}")
+            else:
+                st.error(f"⚠️ Pérdida Neta: ${abs(utilidad_neta_calc):,.0f}")
         
         estado_pago = st.selectbox("Estado", ["Pagado", "Pendiente"])
         dias_credito = st.number_input("Días Crédito", value=DEFAULT_CREDITO_DIAS, min_value=0)
         
-        if st.form_submit_button("Guardar Viaje"):
-            # Determinar valores finales
+        if st.form_submit_button("💾 Guardar Operación"):
             producto_final = nuevo_producto or producto
             proveedor_final = nuevo_proveedor or proveedor
             cliente_final = nuevo_cliente or cliente
             
-            # Validar operación
+            # Validar
             es_valida, advertencias, errores = validar_operacion_comercial(
-                kg_compra, precio_compra, kg_venta, precio_venta, fletes, descuentos
+                kg_compra, precio_compra, kg_venta, precio_venta,
+                viaticos, fletes, otros_gastos, retenciones, descuentos
             )
             
-            # Mostrar errores
             if errores:
                 for error in errores:
                     st.error(f"❌ {error}")
             
-            # Mostrar advertencias
             if advertencias:
                 for advertencia in advertencias:
                     st.warning(advertencia)
             
-            # Proceder si es válida
             if es_valida and proveedor_final and cliente_final:
                 with st.spinner("Guardando operación..."):
                     try:
-                        # Subir archivos
                         url_compra = subir_archivo(file_compra, f"c_{proveedor_final}")
                         url_venta = subir_archivo(file_venta, f"v_{cliente_final}")
                         
-                        # Preparar datos
                         datos_operacion = {
                             "fecha": str(fecha_operacion),
                             "producto": producto_final,
@@ -757,11 +741,14 @@ with tab_nueva_op:
                             "cliente": cliente_final,
                             "kg_compra": kg_compra,
                             "precio_compra": precio_compra,
+                            "viaticos": viaticos,
                             "fletes": fletes,
+                            "otros_gastos": otros_gastos,
                             "kg_venta": kg_venta,
                             "precio_venta": precio_venta,
+                            "retenciones": retenciones,
                             "descuentos": descuentos,
-                            "utilidad": utilidad_estimada,
+                            "utilidad": utilidad_neta_calc,
                             "estado_pago": estado_pago,
                             "dias_credito": dias_credito,
                             "precio_plaza": precio_plaza,
@@ -769,7 +756,6 @@ with tab_nueva_op:
                             "fev_doc_url": url_venta if url_venta else ""
                         }
                         
-                        # Insertar en base de datos
                         supabase.table("ventas_2026").insert(datos_operacion).execute()
                         cargar_datos.clear()
                         st.success("✅ ¡Operación registrada exitosamente!")
@@ -785,15 +771,13 @@ with tab_nueva_op:
 
 with tab_cartera:
     if not df_ventas_filtradas.empty:
-        # Configuración de columnas
         config_columnas = {
             "FEC_Doc": st.column_config.LinkColumn("F.C", display_text="Ver"),
             "FEV_Doc": st.column_config.LinkColumn("F.V", display_text="Ver"),
             "Fecha": st.column_config.DateColumn("Fecha", format="DD/MM/YYYY"),
-            "Utilidad": st.column_config.NumberColumn("Utilidad", format="$%d"),
+            "Utilidad": st.column_config.NumberColumn("Utilidad Neta", format="$%d"),
         }
         
-        # Mostrar tabla interactiva
         evento = st.dataframe(
             df_ventas_filtradas.style.apply(color_deuda, axis=1),
             use_container_width=True,
@@ -803,85 +787,52 @@ with tab_cartera:
             hide_index=True
         )
         
-        # Edición de registro seleccionado
         if evento.selection.rows:
-            fila_seleccionada = df_ventas_filtradas.iloc[evento.selection.rows[0]]
+            fila = df_ventas_filtradas.iloc[evento.selection.rows[0]]
             st.divider()
-            st.markdown(f"### ✏️ Editando: **{fila_seleccionada['Fecha'].strftime('%d-%b')}**")
+            st.markdown(f"### ✏️ Editando: **{fila['Fecha'].strftime('%d-%b')}** - {fila['Cliente']}")
             
             with st.form("edit_full"):
                 col1, col2, col3, col4 = st.columns(4)
                 
-                edit_fecha = col1.date_input(
-                    "Fecha Original",
-                    value=pd.to_datetime(fila_seleccionada['Fecha']).date()
-                )
-                edit_cliente = col2.text_input("Cliente", value=fila_seleccionada['Cliente'])
-                edit_proveedor = col3.text_input("Proveedor", value=fila_seleccionada['Proveedor'])
-                edit_producto = col4.text_input("Producto", value=fila_seleccionada['Producto'])
+                e_fecha = col1.date_input("Fecha", value=pd.to_datetime(fila['Fecha']).date())
+                e_cliente = col2.text_input("Cliente", value=fila['Cliente'])
+                e_prov = col3.text_input("Proveedor", value=fila['Proveedor'])
+                e_prod = col4.text_input("Producto", value=fila['Producto'])
                 
                 st.markdown("**Datos Compra**")
-                cc1, cc2, cc3, cc4 = st.columns(4)
-                edit_kg_compra = cc1.number_input(
-                    "Kg Compra",
-                    value=float(fila_seleccionada['Kg_Compra']),
-                    format="%.2f"
-                )
-                edit_precio_compra = cc2.number_input(
-                    "Precio Compra",
-                    value=float(fila_seleccionada['Precio_Compra']),
-                    format="%.2f"
-                )
-                edit_precio_plaza = cc3.number_input(
-                    "Precio Plaza",
-                    value=float(fila_seleccionada['Precio_Plaza']),
-                    format="%.2f"
-                )
-                edit_fletes = cc4.number_input(
-                    "Fletes",
-                    value=float(fila_seleccionada.get('Fletes', 0.0)),
-                    format="%.2f"
-                )
+                cc1, cc2, cc3 = st.columns(3)
+                e_kgc = cc1.number_input("Kg Compra", value=float(fila['Kg_Compra']), format="%.2f")
+                e_pc = cc2.number_input("Precio Compra", value=float(fila['Precio_Compra']), format="%.2f")
+                e_plaza = cc3.number_input("Precio Plaza", value=float(fila['Precio_Plaza']), format="%.2f")
+                
+                st.markdown("**Costos Adicionales**")
+                cc4, cc5, cc6 = st.columns(3)
+                e_viat = cc4.number_input("Viáticos", value=float(fila.get('Viaticos', 0.0)), format="%.2f")
+                e_flete = cc5.number_input("Fletes", value=float(fila.get('Fletes', 0.0)), format="%.2f")
+                e_otros = cc6.number_input("Otros Gastos", value=float(fila.get('Otros_Gastos', 0.0)), format="%.2f")
                 
                 st.markdown("**Datos Venta**")
                 cv1, cv2, cv3, cv4 = st.columns(4)
-                edit_kg_venta = cv1.number_input(
-                    "Kg Venta",
-                    value=float(fila_seleccionada['Kg_Venta']),
-                    format="%.2f"
-                )
-                edit_precio_venta = cv2.number_input(
-                    "Precio Venta",
-                    value=float(fila_seleccionada['Precio_Venta']),
-                    format="%.2f"
-                )
-                edit_descuentos = cv3.number_input(
-                    "Deducciones",
-                    value=float(fila_seleccionada.get('Descuentos', 0.0)),
-                    format="%.2f"
-                )
-                edit_estado = cv4.selectbox(
+                e_kgv = cv1.number_input("Kg Venta", value=float(fila['Kg_Venta']), format="%.2f")
+                e_pv = cv2.number_input("Precio Venta", value=float(fila['Precio_Venta']), format="%.2f")
+                e_ret = cv3.number_input("Retenciones", value=float(fila.get('Retenciones', 0.0)), format="%.2f")
+                e_desc = cv4.number_input("Descuentos", value=float(fila.get('Descuentos', 0.0)), format="%.2f")
+                
+                e_est = st.selectbox(
                     "Estado Pago",
                     ["Pagado", "Pendiente"],
-                    index=0 if fila_seleccionada['Estado_Pago'] == "Pagado" else 1
+                    index=0 if fila['Estado_Pago'] == "Pagado" else 1
                 )
                 
                 st.markdown("**Soportes (Subir para reemplazar)**")
                 cf1, cf2 = st.columns(2)
-                nuevo_file_compra = cf1.file_uploader(
-                    "Nueva F.Compra",
-                    type=list(ALLOWED_FILE_EXTENSIONS)
-                )
-                nuevo_file_venta = cf2.file_uploader(
-                    "Nueva F.Venta",
-                    type=list(ALLOWED_FILE_EXTENSIONS)
-                )
+                new_file_c = cf1.file_uploader("Nueva F.Compra", type=list(ALLOWED_FILE_EXTENSIONS))
+                new_file_v = cf2.file_uploader("Nueva F.Venta", type=list(ALLOWED_FILE_EXTENSIONS))
                 
                 if st.form_submit_button("💾 Guardar Cambios"):
-                    # Validar
                     es_valida, advertencias, errores = validar_operacion_comercial(
-                        edit_kg_compra, edit_precio_compra, edit_kg_venta,
-                        edit_precio_venta, edit_fletes, edit_descuentos
+                        e_kgc, e_pc, e_kgv, e_pv, e_viat, e_flete, e_otros, e_ret, e_desc
                     )
                     
                     if errores:
@@ -894,44 +845,41 @@ with tab_cartera:
                     
                     if es_valida:
                         try:
-                            # Calcular nueva utilidad
-                            nueva_utilidad = calcular_utilidad(
-                                edit_kg_venta, edit_precio_venta, edit_kg_compra,
-                                edit_precio_compra, edit_fletes, edit_descuentos
+                            nueva_utilidad = calcular_utilidad_neta(
+                                e_kgv, e_pv, e_kgc, e_pc, e_viat, e_flete, e_otros, e_ret, e_desc
                             )
                             
-                            # Preparar actualizaciones
                             actualizaciones = {
-                                "fecha": str(edit_fecha),
-                                "cliente": edit_cliente,
-                                "proveedor": edit_proveedor,
-                                "producto": edit_producto,
-                                "kg_compra": edit_kg_compra,
-                                "precio_compra": edit_precio_compra,
-                                "precio_plaza": edit_precio_plaza,
-                                "fletes": edit_fletes,
-                                "kg_venta": edit_kg_venta,
-                                "precio_venta": edit_precio_venta,
-                                "descuentos": edit_descuentos,
-                                "estado_pago": edit_estado,
+                                "fecha": str(e_fecha),
+                                "cliente": e_cliente,
+                                "proveedor": e_prov,
+                                "producto": e_prod,
+                                "kg_compra": e_kgc,
+                                "precio_compra": e_pc,
+                                "precio_plaza": e_plaza,
+                                "viaticos": e_viat,
+                                "fletes": e_flete,
+                                "otros_gastos": e_otros,
+                                "kg_venta": e_kgv,
+                                "precio_venta": e_pv,
+                                "retenciones": e_ret,
+                                "descuentos": e_desc,
+                                "estado_pago": e_est,
                                 "utilidad": nueva_utilidad
                             }
                             
-                            # Subir nuevos archivos si existen
-                            if nuevo_file_compra:
-                                url = subir_archivo(nuevo_file_compra, f"e_c_{edit_proveedor}")
-                                if url:
-                                    actualizaciones["fec_doc_url"] = url
+                            if new_file_c:
+                                u = subir_archivo(new_file_c, f"e_c_{e_prov}")
+                                if u:
+                                    actualizaciones["fec_doc_url"] = u
                             
-                            if nuevo_file_venta:
-                                url = subir_archivo(nuevo_file_venta, f"e_v_{edit_cliente}")
-                                if url:
-                                    actualizaciones["fev_doc_url"] = url
+                            if new_file_v:
+                                u = subir_archivo(new_file_v, f"e_v_{e_cliente}")
+                                if u:
+                                    actualizaciones["fev_doc_url"] = u
                             
-                            # Actualizar en base de datos
                             supabase.table("ventas_2026").update(actualizaciones).eq(
-                                "id",
-                                int(fila_seleccionada['ID'])
+                                "id", int(fila['ID'])
                             ).execute()
                             
                             cargar_datos.clear()
@@ -942,13 +890,9 @@ with tab_cartera:
                             logger.error(f"Error al actualizar registro: {e}")
                             st.error(f"❌ Error al actualizar: {str(e)}")
             
-            # Botón de borrado
             if st.button("🗑️ Borrar Registro"):
                 try:
-                    supabase.table("ventas_2026").delete().eq(
-                        "id",
-                        int(fila_seleccionada['ID'])
-                    ).execute()
+                    supabase.table("ventas_2026").delete().eq("id", int(fila['ID'])).execute()
                     cargar_datos.clear()
                     st.success("✅ Registro eliminado")
                     st.rerun()
