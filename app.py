@@ -520,20 +520,120 @@ tab_dashboard, tab_analitica, tab_movimientos, tab_nueva_op, tab_cartera = st.ta
 with tab_dashboard:
     st.subheader("Estado Financiero")
     
-    utilidad_bruta = df_ventas_filtradas['Utilidad'].sum() if not df_ventas_filtradas.empty else 0
+    # Calcular utilidades
+    utilidad_operaciones = df_ventas_filtradas['Utilidad'].sum() if not df_ventas_filtradas.empty else 0
+    
+    # Separar gastos fijos (nómina, etc.) de gastos operativos
     gastos_periodo = df_gastos_filtrados[df_gastos_filtrados['Tipo'] == 'Gasto']['Monto'].sum() \
         if not df_gastos_filtrados.empty else 0
-    utilidad_neta = utilidad_bruta - gastos_periodo
+    
+    utilidad_neta_final = utilidad_operaciones - gastos_periodo
     volumen_total = df_ventas_filtradas['Kg_Venta'].sum() if not df_ventas_filtradas.empty else 0
     
-    col1, col2, col3 = st.columns(3)
+    # Métricas principales
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("💰 CAJA REAL", f"${caja_sistema:,.0f}", delta="Disponible")
-    col2.metric("Utilidad Neta", f"${utilidad_neta:,.0f}", delta="Real")
-    col3.metric("Volumen", f"{volumen_total:,.1f} Kg")
+    col2.metric("📦 Utilidad Operaciones", f"${utilidad_operaciones:,.0f}", delta="Sin gastos fijos")
+    col3.metric("💵 Utilidad Neta", f"${utilidad_neta_final:,.0f}", delta="Después de gastos")
+    col4.metric("📊 Volumen", f"{volumen_total:,.1f} Kg")
+    
+    # Desglose de gastos (nuevo)
+    if gastos_periodo > 0:
+        st.divider()
+        st.markdown("### 📋 Desglose de Gastos Fijos")
+        
+        col_a, col_b = st.columns([2, 1])
+        
+        with col_a:
+            # Mostrar tabla de gastos
+            if not df_gastos_filtrados.empty:
+                gastos_detalle = df_gastos_filtrados[df_gastos_filtrados['Tipo'] == 'Gasto'][
+                    ['Fecha', 'Concepto', 'Monto']
+                ].copy()
+                
+                if not gastos_detalle.empty:
+                    st.dataframe(
+                        gastos_detalle.style.format({'Monto': '${:,.0f}'}),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+        
+        with col_b:
+            # Resumen visual
+            st.metric("Total Gastos Fijos", f"${gastos_periodo:,.0f}", delta=f"-{(gastos_periodo/utilidad_operaciones*100):.1f}% de utilidad" if utilidad_operaciones > 0 else "")
+            
+            # Margen de utilidad
+            if utilidad_operaciones > 0:
+                margen = (utilidad_neta_final / utilidad_operaciones) * 100
+                st.metric("Margen Neto", f"{margen:.1f}%", delta="Después de gastos fijos")
 
 # ==================== TAB: ANALÍTICA ====================
 
 with tab_analitica:
+    st.subheader("📈 Análisis Financiero")
+    
+    # Sección 1: Flujo de Utilidades
+    if not df_ventas_filtradas.empty:
+        st.markdown("### 💰 Flujo de Utilidades")
+        
+        col_flow1, col_flow2, col_flow3 = st.columns(3)
+        
+        utilidad_ops = df_ventas_filtradas['Utilidad'].sum()
+        gastos_fijos_total = df_gastos_filtrados[df_gastos_filtrados['Tipo'] == 'Gasto']['Monto'].sum() \
+            if not df_gastos_filtrados.empty else 0
+        utilidad_final = utilidad_ops - gastos_fijos_total
+        
+        with col_flow1:
+            st.metric(
+                "1️⃣ Utilidad Operaciones",
+                f"${utilidad_ops:,.0f}",
+                help="Ganancia de las operaciones comerciales (ventas - costos)"
+            )
+        
+        with col_flow2:
+            st.metric(
+                "2️⃣ Gastos Fijos",
+                f"-${gastos_fijos_total:,.0f}",
+                delta=f"{(gastos_fijos_total/utilidad_ops*100):.1f}% de utilidad" if utilidad_ops > 0 else "",
+                delta_color="inverse",
+                help="Nómina, gasolina, y otros gastos operativos fijos"
+            )
+        
+        with col_flow3:
+            st.metric(
+                "3️⃣ Utilidad Neta Final",
+                f"${utilidad_final:,.0f}",
+                delta=f"{(utilidad_final/utilidad_ops*100):.1f}% margen" if utilidad_ops > 0 else "",
+                help="Ganancia real después de todos los gastos"
+            )
+        
+        # Gráfico de flujo
+        import plotly.graph_objects as go
+        
+        fig_waterfall = go.Figure(go.Waterfall(
+            name = "Flujo de Utilidad",
+            orientation = "v",
+            measure = ["relative", "relative", "total"],
+            x = ["Utilidad<br>Operaciones", "Gastos<br>Fijos", "Utilidad<br>Neta"],
+            y = [utilidad_ops, -gastos_fijos_total, utilidad_final],
+            text = [f"${utilidad_ops:,.0f}", f"-${gastos_fijos_total:,.0f}", f"${utilidad_final:,.0f}"],
+            textposition = "outside",
+            connector = {"line":{"color":"rgb(63, 63, 63)"}},
+        ))
+        
+        fig_waterfall.update_layout(
+            title = "Flujo de Utilidad",
+            showlegend = False,
+            height = 400
+        )
+        
+        st.plotly_chart(fig_waterfall, use_container_width=True)
+        
+        st.divider()
+    
+    # Sección 2: Análisis de Precios (existente)
+    st.markdown("### 📊 Análisis de Precios")
+    
     if not df_ventas_filtradas.empty:
         df_precios = df_ventas_filtradas[df_ventas_filtradas['Precio_Plaza'] > 0].sort_values("Fecha")
         
@@ -546,7 +646,7 @@ with tab_analitica:
                     x='Fecha',
                     y=['Precio_Compra', 'Precio_Plaza'],
                     markers=True,
-                    title="Precios: Compra vs Plaza"
+                    title="Evolución: Precio Compra vs Plaza"
                 )
                 st.plotly_chart(fig, use_container_width=True)
             else:
@@ -563,6 +663,15 @@ with tab_analitica:
                     f"${ahorro_promedio:,.0f}",
                     delta="Ahorro/Kg" if ahorro_promedio > 0 else "Sobrecosto"
                 )
+                
+                # Ahorro total vs plaza
+                if ahorro_promedio > 0:
+                    ahorro_total = ahorro_promedio * df_precios['Kg_Compra'].sum()
+                    st.metric(
+                        "Ahorro Total",
+                        f"${ahorro_total:,.0f}",
+                        help="Si hubieras comprado al precio de plaza"
+                    )
 
 # ==================== TAB: MOVIMIENTOS ====================
 
