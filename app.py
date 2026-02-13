@@ -729,6 +729,212 @@ def calcular_progreso_meta(utilidad_actual, operaciones_actuales, volumen_actual
     
     return progreso
 
+
+# ==================== FUNCIONES DE PREDICCIÓN CON IA ====================
+
+import numpy as np
+from datetime import timedelta
+
+def predecir_precio_proxima_semana(df_historico, producto="Plátano"):
+    """
+    Predice el precio para la próxima semana usando promedio móvil y tendencia.
+    """
+    prediccion = {
+        'precio_estimado': 0,
+        'confianza': 0,
+        'rango_min': 0,
+        'rango_max': 0,
+        'tendencia': 'estable',
+        'sugerencia': ''
+    }
+    
+    if df_historico.empty:
+        return prediccion
+    
+    # Filtrar por producto
+    df_prod = df_historico[df_historico['producto'] == producto].copy()
+    
+    if len(df_prod) < 4:
+        return prediccion
+    
+    # Ordenar por fecha
+    df_prod = df_prod.sort_values('fecha')
+    
+    # Calcular promedio móvil de últimas 4 semanas
+    ultimos_precios = df_prod['precio_compra'].tail(8).values
+    
+    if len(ultimos_precios) < 4:
+        return prediccion
+    
+    # Predicción simple: promedio ponderado (más peso a recientes)
+    pesos = np.array([1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5])[:len(ultimos_precios)]
+    precio_pred = np.average(ultimos_precios, weights=pesos)
+    
+    # Calcular tendencia
+    if len(ultimos_precios) >= 4:
+        mitad = len(ultimos_precios) // 2
+        promedio_antiguo = np.mean(ultimos_precios[:mitad])
+        promedio_reciente = np.mean(ultimos_precios[mitad:])
+        
+        diferencia_pct = ((promedio_reciente - promedio_antiguo) / promedio_antiguo) * 100
+        
+        if diferencia_pct > 10:
+            tendencia = 'subida'
+        elif diferencia_pct < -10:
+            tendencia = 'bajada'
+        else:
+            tendencia = 'estable'
+    else:
+        tendencia = 'estable'
+    
+    # Calcular rango de confianza (±10%)
+    desviacion = np.std(ultimos_precios)
+    rango_min = max(0, precio_pred - desviacion)
+    rango_max = precio_pred + desviacion
+    
+    # Confianza basada en variabilidad
+    coef_variacion = (desviacion / precio_pred) * 100 if precio_pred > 0 else 100
+    confianza = max(0, 100 - coef_variacion)
+    
+    # Generar sugerencia
+    if tendencia == 'subida':
+        sugerencia = f"📈 Precio en tendencia alcista (+{diferencia_pct:.1f}%). Considera comprar pronto antes que suba más."
+    elif tendencia == 'bajada':
+        sugerencia = f"📉 Precio en tendencia bajista ({diferencia_pct:.1f}%). Puedes esperar un poco para mejor precio."
+    else:
+        sugerencia = "➡️ Precio estable. Buen momento para comprar según tus necesidades."
+    
+    prediccion = {
+        'precio_estimado': float(precio_pred),
+        'confianza': float(confianza),
+        'rango_min': float(rango_min),
+        'rango_max': float(rango_max),
+        'tendencia': tendencia,
+        'sugerencia': sugerencia,
+        'ultimo_precio': float(ultimos_precios[-1])
+    }
+    
+    return prediccion
+
+def analizar_mejor_dia_compra(df_historico, producto="Plátano"):
+    """
+    Analiza qué día de la semana tiene mejores precios históricamente.
+    """
+    analisis = {
+        'mejor_dia': None,
+        'precio_promedio': {},
+        'sugerencia': ''
+    }
+    
+    if df_historico.empty:
+        return analisis
+    
+    # Filtrar por producto
+    df_prod = df_historico[df_historico['producto'] == producto].copy()
+    
+    if df_prod.empty:
+        return analisis
+    
+    # Agregar día de la semana
+    df_prod['dia_semana'] = df_prod['fecha'].dt.day_name()
+    
+    # Calcular promedio por día
+    precios_por_dia = df_prod.groupby('dia_semana')['precio_compra'].agg(['mean', 'count']).to_dict('index')
+    
+    # Filtrar días con al menos 2 operaciones
+    dias_validos = {dia: datos for dia, datos in precios_por_dia.items() if datos['count'] >= 2}
+    
+    if not dias_validos:
+        return analisis
+    
+    # Encontrar mejor día (menor precio)
+    mejor_dia = min(dias_validos.items(), key=lambda x: x[1]['mean'])
+    peor_dia = max(dias_validos.items(), key=lambda x: x[1]['mean'])
+    
+    # Traducir días
+    dias_es = {
+        'Monday': 'Lunes', 'Tuesday': 'Martes', 'Wednesday': 'Miércoles',
+        'Thursday': 'Jueves', 'Friday': 'Viernes', 'Saturday': 'Sábado', 'Sunday': 'Domingo'
+    }
+    
+    precio_promedio = {dias_es.get(dia, dia): datos['mean'] for dia, datos in dias_validos.items()}
+    
+    ahorro_potencial = peor_dia[1]['mean'] - mejor_dia[1]['mean']
+    pct_ahorro = (ahorro_potencial / peor_dia[1]['mean']) * 100
+    
+    sugerencia = f"💡 Históricamente, {dias_es.get(mejor_dia[0], mejor_dia[0])} tiene mejores precios "
+    sugerencia += f"(${mejor_dia[1]['mean']:,.0f}/kg promedio). "
+    sugerencia += f"Ahorras hasta ${ahorro_potencial:,.0f}/kg ({pct_ahorro:.1f}%) vs {dias_es.get(peor_dia[0], peor_dia[0])}."
+    
+    analisis = {
+        'mejor_dia': dias_es.get(mejor_dia[0], mejor_dia[0]),
+        'precio_promedio': precio_promedio,
+        'sugerencia': sugerencia,
+        'ahorro_potencial': float(ahorro_potencial)
+    }
+    
+    return analisis
+
+def detectar_patrones_estacionales(df_historico, producto="Plátano"):
+    """
+    Detecta patrones estacionales en los precios.
+    """
+    patrones = {
+        'meses_caros': [],
+        'meses_baratos': [],
+        'patron_detectado': False,
+        'descripcion': ''
+    }
+    
+    if df_historico.empty:
+        return patrones
+    
+    df_prod = df_historico[df_historico['producto'] == producto].copy()
+    
+    if len(df_prod) < 12:  # Necesitamos al menos 12 operaciones
+        return patrones
+    
+    # Agregar mes
+    df_prod['mes'] = df_prod['fecha'].dt.month
+    
+    # Promedio por mes
+    precios_por_mes = df_prod.groupby('mes')['precio_compra'].agg(['mean', 'count'])
+    
+    # Filtrar meses con al menos 2 operaciones
+    precios_por_mes = precios_por_mes[precios_por_mes['count'] >= 2]
+    
+    if len(precios_por_mes) < 3:
+        return patrones
+    
+    # Calcular promedio general
+    promedio_general = precios_por_mes['mean'].mean()
+    
+    # Identificar meses caros (>15% sobre promedio)
+    meses_caros = precios_por_mes[precios_por_mes['mean'] > promedio_general * 1.15]
+    meses_baratos = precios_por_mes[precios_por_mes['mean'] < promedio_general * 0.85]
+    
+    meses_nombres = ['', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                     'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+    
+    if not meses_caros.empty or not meses_baratos.empty:
+        patrones['patron_detectado'] = True
+        
+        if not meses_caros.empty:
+            patrones['meses_caros'] = [meses_nombres[m] for m in meses_caros.index]
+        
+        if not meses_baratos.empty:
+            patrones['meses_baratos'] = [meses_nombres[m] for m in meses_baratos.index]
+        
+        descripcion = "📊 Patrones detectados: "
+        if patrones['meses_caros']:
+            descripcion += f"Precios altos en {', '.join(patrones['meses_caros'])}. "
+        if patrones['meses_baratos']:
+            descripcion += f"Precios bajos en {', '.join(patrones['meses_baratos'])}."
+        
+        patrones['descripcion'] = descripcion
+    
+    return patrones
+
 # ==================== SEGURIDAD ====================
 
 def verificar_password():
@@ -2281,6 +2487,135 @@ with tab_precios:
         
         st.divider()
         
+
+        # ==================== PREDICCIÓN CON IA ====================
+        
+        st.divider()
+        st.markdown("### 🤖 Predicción Inteligente de Precios")
+        
+        # Combinar datos 2025 y 2026 para predicción
+        df_completo = pd.DataFrame()
+        
+        if not df_2025.empty:
+            df_2025_temp = df_2025[['fecha', 'producto', 'precio_compra']].copy()
+            df_completo = df_2025_temp
+        
+        if not df_ventas.empty:
+            df_2026_temp = df_ventas[['Fecha', 'Producto', 'Precio_Compra']].copy()
+            df_2026_temp.columns = ['fecha', 'producto', 'precio_compra']
+            df_completo = pd.concat([df_completo, df_2026_temp], ignore_index=True)
+        
+        if not df_completo.empty:
+            # Predicción de precio próxima semana
+            prediccion = predecir_precio_proxima_semana(df_completo, producto_seleccionado)
+            
+            if prediccion['precio_estimado'] > 0:
+                st.markdown("#### 📈 Predicción para Próxima Semana")
+                
+                col_p1, col_p2, col_p3 = st.columns(3)
+                
+                with col_p1:
+                    st.metric(
+                        "Precio Estimado",
+                        f"${prediccion['precio_estimado']:,.0f}/kg",
+                        delta=f"${prediccion['precio_estimado'] - prediccion['ultimo_precio']:+,.0f} vs último"
+                    )
+                
+                with col_p2:
+                    st.metric(
+                        "Rango Esperado",
+                        f"${prediccion['rango_min']:,.0f} - ${prediccion['rango_max']:,.0f}",
+                        help="Rango de precios probable"
+                    )
+                
+                with col_p3:
+                    # Emoji de tendencia
+                    tendencia_emoji = {"subida": "📈", "bajada": "📉", "estable": "➡️"}
+                    st.metric(
+                        "Tendencia",
+                        prediccion['tendencia'].title(),
+                        delta=f"{prediccion['confianza']:.0f}% confianza"
+                    )
+                
+                # Sugerencia
+                if prediccion['tendencia'] == 'subida':
+                    st.warning(prediccion['sugerencia'])
+                elif prediccion['tendencia'] == 'bajada':
+                    st.success(prediccion['sugerencia'])
+                else:
+                    st.info(prediccion['sugerencia'])
+            
+            st.divider()
+            
+            # Mejor día para comprar
+            analisis_dias = analizar_mejor_dia_compra(df_completo, producto_seleccionado)
+            
+            if analisis_dias['mejor_dia']:
+                st.markdown("#### 📅 Mejor Día para Comprar")
+                
+                col_d1, col_d2 = st.columns([2, 1])
+                
+                with col_d1:
+                    st.success(analisis_dias['sugerencia'])
+                    
+                    # Gráfico de precios por día
+                    if analisis_dias['precio_promedio']:
+                        df_dias = pd.DataFrame([
+                            {'Día': dia, 'Precio': precio}
+                            for dia, precio in analisis_dias['precio_promedio'].items()
+                        ])
+                        
+                        fig_dias = go.Figure(data=[
+                            go.Bar(
+                                x=df_dias['Día'],
+                                y=df_dias['Precio'],
+                                text=df_dias['Precio'].apply(lambda x: f"${x:,.0f}"),
+                                textposition='auto',
+                                marker_color=['#66bb6a' if dia == analisis_dias['mejor_dia'] else '#90caf9' 
+                                             for dia in df_dias['Día']]
+                            )
+                        ])
+                        
+                        fig_dias.update_layout(
+                            title="Precio Promedio por Día de la Semana",
+                            xaxis_title="Día",
+                            yaxis_title="Precio ($/kg)",
+                            height=300,
+                            showlegend=False
+                        )
+                        
+                        st.plotly_chart(fig_dias, use_container_width=True)
+                
+                with col_d2:
+                    st.metric(
+                        "Mejor Día",
+                        analisis_dias['mejor_dia'],
+                        delta=f"-${analisis_dias['ahorro_potencial']:,.0f}/kg",
+                        help="Ahorro potencial vs día más caro"
+                    )
+            
+            st.divider()
+            
+            # Patrones estacionales
+            patrones = detectar_patrones_estacionales(df_completo, producto_seleccionado)
+            
+            if patrones['patron_detectado']:
+                st.markdown("#### 🔄 Patrones Estacionales Detectados")
+                
+                col_pat1, col_pat2 = st.columns(2)
+                
+                with col_pat1:
+                    if patrones['meses_caros']:
+                        st.error(f"**Meses Caros:** {', '.join(patrones['meses_caros'])}")
+                
+                with col_pat2:
+                    if patrones['meses_baratos']:
+                        st.success(f"**Meses Baratos:** {', '.join(patrones['meses_baratos'])}")
+                
+                st.info(patrones['descripcion'])
+        else:
+            st.info("ℹ️ No hay suficientes datos para predicción con IA")
+
         # Sistema de notas
         st.markdown("### 📝 Agregar Nota")
         
