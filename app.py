@@ -342,6 +342,87 @@ def color_deuda(row):
             color = 'background-color: #e8f5e9; color: #1b5e20; font-weight: bold;'
         elif row['Estado_Pago'] == 'Pendiente':
             dias_credito = int(row['Dias_Credito']) if pd.notnull(row['Dias_Credito']) else 0
+            fecha_vencimiento = row['Fecha'] + timedelta(days=dias_credito)
+            dias_restantes = (fecha_vencimiento.date() - date.today()).days
+            
+            if dias_restantes < 0:
+                color = 'background-color: #ffebee; color: #b71c1c; font-weight: bold;'
+            elif dias_restantes <= 3:
+                color = 'background-color: #fff8e1; color: #f57f17; font-weight: bold;'
+    except Exception as e:
+        logger.error(f"Error al aplicar color: {e}")
+    
+    return [color] * len(row)
+
+def obtener_opciones(df, columna, valores_default):
+    """Obtiene lista de opciones únicas."""
+    existentes = df[columna].unique().tolist() if not df.empty and columna in df.columns else []
+    todas = list(set(valores_default + [x for x in existentes if x]))
+    return sorted(todas)
+
+# ==================== FUNCIONES DE BASE DE DATOS ====================
+
+def subir_archivo(archivo, nombre_base):
+    """Sube archivo a Supabase Storage."""
+    if not archivo:
+        return None
+    
+    es_valido, mensaje_error = validar_archivo(archivo)
+    if not es_valido:
+        st.error(f"❌ {mensaje_error}")
+        return None
+    
+    try:
+        ext = archivo.name.split('.')[-1].lower()
+        nombre_limpio = limpiar_nombre_archivo(nombre_base)
+        timestamp = datetime.now().strftime('%m%d_%H%M')
+        nombre_archivo = f"{nombre_limpio}_{timestamp}.{ext}"
+        
+        supabase.storage.from_(BUCKET_FACTURAS).upload(
+            nombre_archivo,
+            archivo.getvalue(),
+            {"content-type": archivo.type, "upsert": "true"}
+        )
+        
+        url_publica = supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
+        logger.info(f"Archivo subido: {nombre_archivo}")
+        return url_publica
+        
+    except Exception as e:
+        logger.error(f"Error al subir archivo: {e}")
+        st.error(f"❌ Error: {str(e)}")
+        return None
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def cargar_datos():
+    """Carga datos desde Supabase con caché optimizado."""
+    df_ventas = pd.DataFrame()
+    try:
+        respuesta = supabase.table("ventas_2026").select("*").order("fecha", desc=True).execute()
+        df_ventas = pd.DataFrame(respuesta.data)
+        
+        if not df_ventas.empty:
+            columnas_mapa = {
+                'id': 'ID', 'fecha': 'Fecha', 'producto': 'Producto', 
+                'proveedor': 'Proveedor', 'cliente': 'Cliente',
+                'fec_doc_url': 'FEC_Doc', 'fev_doc_url': 'FEV_Doc',
+                'kg_compra': 'Kg_Compra', 'precio_compra': 'Precio_Compra',
+                'viaticos': 'Viaticos', 'fletes': 'Fletes', 'otros_gastos': 'Otros_Gastos',
+                'kg_venta': 'Kg_Venta', 'precio_venta': 'Precio_Venta',
+                'retenciones': 'Retenciones', 'descuentos': 'Descuentos',
+                'utilidad': 'Utilidad', 'estado_pago': 'Estado_Pago',
+                'dias_credito': 'Dias_Credito', 'precio_plaza': 'Precio_Plaza'
+            }
+            df_ventas = df_ventas.rename(
+                columns={k: v for k, v in columnas_mapa.items() if k in df_ventas.columns}
+            )
+            
+            df_ventas['Fecha'] = pd.to_datetime(df_ventas['Fecha'])
+            
+            campos_numericos = [
+                'Kg_Compra', 'Precio_Compra', 'Viaticos', 'Fletes', 'Otros_Gastos',
+                'Kg_Venta', 'Precio_Venta', 'Retenciones', 'Descuentos', 
+                'Utilidad', 'Precio_Plaza'
             ]
             for campo in campos_numericos:
                 if campo in df_ventas.columns:
@@ -561,93 +642,7 @@ with st.sidebar.form("config_caja"):
             logger.error(f"Error al ajustar caja: {e}")
             st.error(f"❌ Error: {str(e)}")
 
-# ==================== CARGA TEMPORAL DE DATOS 2025 ====================
-st.sidebar.divider()
-st.sidebar.subheader("🔄 Cargar Datos 2025")
-
-with st.sidebar.expander("⚠️ Solo una vez"):
-    uploaded_csv = st.file_uploader("Sube AM_2025.csv", type=['csv'], key="csv_2025")
-    
-    if uploaded_csv and st.button("🚀 Cargar a Supabase"):
-        with st.spinner("Procesando..."):
-            try:
-                df_csv = pd.read_csv(uploaded_csv)
-                
-                def limpiar_moneda(valor):
-                    if pd.isna(valor) or valor == '':
-                        return 0.0
-                    if isinstance(valor, str):
-                        valor = valor.replace('$', '').replace(',', '').replace(' ', '')
-                        try:
-                            return float(valor)
-                        except:
-                            return 0.0
-                    return float(valor)
-                
-                def normalizar_cliente(cliente):
-                    if pd.isna(cliente) or cliente == '':
-                        return None
-                    if 'Fogón' in str(cliente) or 'Fogoón' in str(cliente):
-                        return 'Fogón del Mar'
-                    return str(cliente).strip()
-                
-                df_csv['Fecha'] = pd.to_datetime(df_csv['Fecha'], format='%d/%m/%Y', errors='coerce')
-                
-                columnas_moneda = [
-                    'Precio de Compra', 'Viáticos', 'Flete', 
-                    'Otros Gastos', 'Precio de Venta', 
-                    'RETENCIONES', 'Descuentos', 'Utilidad neta'
-                ]
-                
-                for col in columnas_moneda:
-                    if col in df_csv.columns:
-                        df_csv[col] = df_csv[col].apply(limpiar_moneda)
-                
-                if 'Cantidad (Kg)' in df_csv.columns:
-                    df_csv['Cantidad (Kg)'] = pd.to_numeric(df_csv['Cantidad (Kg)'], errors='coerce').fillna(0)
-                if 'Cantidad (kg)' in df_csv.columns:
-                    df_csv['Cantidad (kg)'] = pd.to_numeric(df_csv['Cantidad (kg)'], errors='coerce').fillna(0)
-                
-                if 'Cliente' in df_csv.columns:
-                    df_csv['Cliente'] = df_csv['Cliente'].apply(normalizar_cliente)
-                
-                df_valido = df_csv[df_csv['Fecha'].notna()].copy()
-                
-                registros = []
-                for idx, row in df_valido.iterrows():
-                    try:
-                        registro = {
-                            'fecha': row['Fecha'].strftime('%Y-%m-%d'),
-                            'proveedor': str(row.get('Proveedor', '')).strip() if pd.notna(row.get('Proveedor')) else None,
-                            'cliente': normalizar_cliente(row.get('Cliente')),
-                            'producto': str(row.get('Producto', '')).strip() if pd.notna(row.get('Producto')) else None,
-                            'kg_compra': float(row.get('Cantidad (Kg)', 0)),
-                            'precio_compra': float(row.get('Precio de Compra', 0)),
-                            'viaticos': float(row.get('Viáticos', 0)),
-                            'fletes': float(row.get('Flete', 0)),
-                            'otros_gastos': float(row.get('Otros Gastos', 0)),
-                            'kg_venta': float(row.get('Cantidad (kg)', 0)),
-                            'precio_venta': float(row.get('Precio de Venta', 0)),
-                            'retenciones': float(row.get('RETENCIONES', 0)),
-                            'descuentos': float(row.get('Descuentos', 0)),
-                            'utilidad_neta': float(row.get('Utilidad neta', 0))
-                        }
-                        registros.append(registro)
-                    except:
-                        continue
-                
-                batch_size = 100
-                total = 0
-                for i in range(0, len(registros), batch_size):
-                    batch = registros[i:i+batch_size]
-                    supabase.table('ventas_2025').insert(batch).execute()
-                    total += len(batch)
-                
-                st.sidebar.success(f"✅ {total} registros cargados!")
-                st.sidebar.info("Ahora elimina esta sección del código")
-                
-            except Exception as e:
-                st.sidebar.error(f"❌ Error: {e}")
+# ==================== FILTROS DE DATOS ====================
 
 # ==================== FILTROS DE DATOS ====================
 
@@ -1758,4 +1753,3 @@ with tab_cartera:
 
 st.divider()
 st.caption("Agrícola Montserrat - Sistema de Gestión v3.0 | FASE 1 Completa | Febrero 2026")
-
