@@ -638,6 +638,97 @@ def guardar_nota_precio(fecha, producto, nota, tipo_evento):
         logger.error(f"Error al guardar nota: {e}")
         return False
 
+
+# ==================== FUNCIONES DE METAS Y OBJETIVOS ====================
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def cargar_metas():
+    """Carga metas mensuales desde Supabase."""
+    df_metas = pd.DataFrame()
+    try:
+        respuesta = supabase.table("metas_mensuales").select("*").order("año", desc=True).order("mes", desc=True).execute()
+        df_metas = pd.DataFrame(respuesta.data)
+        if not df_metas.empty:
+            df_metas['meta_utilidad'] = pd.to_numeric(df_metas['meta_utilidad'], errors='coerce').fillna(0)
+            df_metas['meta_operaciones'] = pd.to_numeric(df_metas['meta_operaciones'], errors='coerce').fillna(0)
+            df_metas['meta_volumen_kg'] = pd.to_numeric(df_metas['meta_volumen_kg'], errors='coerce').fillna(0)
+    except Exception as e:
+        logger.error(f"Error al cargar metas: {e}")
+    return df_metas
+
+def obtener_meta_mes(año, mes):
+    """Obtiene la meta de un mes específico."""
+    df_metas = cargar_metas()
+    if df_metas.empty:
+        return None
+    
+    meta = df_metas[(df_metas['año'] == año) & (df_metas['mes'] == mes)]
+    if not meta.empty:
+        return {
+            'utilidad': float(meta.iloc[0]['meta_utilidad']),
+            'operaciones': int(meta.iloc[0]['meta_operaciones']),
+            'volumen': float(meta.iloc[0]['meta_volumen_kg']),
+            'notas': meta.iloc[0].get('notas', '')
+        }
+    return None
+
+def guardar_meta(año, mes, meta_utilidad, meta_operaciones, meta_volumen, notas=""):
+    """Guarda o actualiza una meta mensual."""
+    try:
+        # Verificar si existe
+        existente = supabase.table("metas_mensuales").select("id").eq("año", año).eq("mes", mes).execute()
+        
+        datos = {
+            "año": año,
+            "mes": mes,
+            "meta_utilidad": meta_utilidad,
+            "meta_operaciones": meta_operaciones,
+            "meta_volumen_kg": meta_volumen,
+            "notas": notas,
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        if existente.data:
+            # Actualizar
+            supabase.table("metas_mensuales").update(datos).eq("año", año).eq("mes", mes).execute()
+        else:
+            # Insertar
+            supabase.table("metas_mensuales").insert(datos).execute()
+        
+        cargar_metas.clear()
+        return True
+    except Exception as e:
+        logger.error(f"Error al guardar meta: {e}")
+        return False
+
+def calcular_progreso_meta(utilidad_actual, operaciones_actuales, volumen_actual, meta):
+    """Calcula el progreso hacia las metas."""
+    if not meta:
+        return None
+    
+    progreso = {
+        'utilidad': {
+            'actual': utilidad_actual,
+            'meta': meta['utilidad'],
+            'porcentaje': (utilidad_actual / meta['utilidad'] * 100) if meta['utilidad'] > 0 else 0,
+            'faltante': meta['utilidad'] - utilidad_actual
+        },
+        'operaciones': {
+            'actual': operaciones_actuales,
+            'meta': meta['operaciones'],
+            'porcentaje': (operaciones_actuales / meta['operaciones'] * 100) if meta['operaciones'] > 0 else 0,
+            'faltante': meta['operaciones'] - operaciones_actuales
+        },
+        'volumen': {
+            'actual': volumen_actual,
+            'meta': meta['volumen'],
+            'porcentaje': (volumen_actual / meta['volumen'] * 100) if meta['volumen'] > 0 else 0,
+            'faltante': meta['volumen'] - volumen_actual
+        }
+    }
+    
+    return progreso
+
 # ==================== SEGURIDAD ====================
 
 def verificar_password():
@@ -699,6 +790,7 @@ if st.sidebar.button("🔄 Actualizar Datos"):
     cargar_datos.clear()
     cargar_datos_2025.clear()
     cargar_notas_precios.clear()
+    cargar_metas.clear()
     st.rerun()
 
 st.sidebar.divider()
@@ -712,6 +804,7 @@ fecha_fin = st.sidebar.date_input("Hasta", date(2026, 12, 31))
 df_ventas, df_gastos, saldo_inicial = cargar_datos()
 df_2025 = cargar_datos_2025()
 df_notas = cargar_notas_precios()
+df_metas = cargar_metas()
 
 
 # ==================== CÁLCULOS FINANCIEROS ====================
@@ -1211,6 +1304,134 @@ with tab_dashboard:
                     height=300
                 )
                 st.plotly_chart(fig_rent, use_container_width=True)
+
+
+    # ==================== SECCIÓN DE METAS Y OBJETIVOS ====================
+    
+    if not df_ventas_filtradas.empty:
+        st.divider()
+        st.markdown("### 🎯 Metas y Objetivos del Mes")
+        
+        # Obtener mes actual
+        mes_actual = fecha_fin.month
+        año_actual = fecha_fin.year
+        
+        # Cargar meta del mes
+        meta_mes = obtener_meta_mes(año_actual, mes_actual)
+        
+        if meta_mes:
+            # Calcular valores actuales
+            util_actual = utilidad_neta_final
+            ops_actuales = len(df_ventas_filtradas)
+            vol_actual = volumen_total
+            
+            # Calcular progreso
+            progreso = calcular_progreso_meta(util_actual, ops_actuales, vol_actual, meta_mes)
+            
+            # Mostrar métricas con progreso
+            col_m1, col_m2, col_m3 = st.columns(3)
+            
+            with col_m1:
+                pct_util = progreso['utilidad']['porcentaje']
+                st.metric(
+                    "🎯 Meta Utilidad",
+                    f"${meta_mes['utilidad']:,.0f}",
+                    delta=f"{pct_util:.1f}% completado"
+                )
+                st.progress(min(pct_util / 100, 1.0))
+                if pct_util < 100:
+                    st.caption(f"Faltan: ${progreso['utilidad']['faltante']:,.0f}")
+                else:
+                    st.caption("✅ ¡Meta cumplida!")
+            
+            with col_m2:
+                pct_ops = progreso['operaciones']['porcentaje']
+                st.metric(
+                    "🎯 Meta Operaciones",
+                    f"{meta_mes['operaciones']} ops",
+                    delta=f"{pct_ops:.1f}% completado"
+                )
+                st.progress(min(pct_ops / 100, 1.0))
+                if pct_ops < 100:
+                    st.caption(f"Faltan: {int(progreso['operaciones']['faltante'])} ops")
+                else:
+                    st.caption("✅ ¡Meta cumplida!")
+            
+            with col_m3:
+                pct_vol = progreso['volumen']['porcentaje']
+                st.metric(
+                    "🎯 Meta Volumen",
+                    f"{meta_mes['volumen']:,.0f} kg",
+                    delta=f"{pct_vol:.1f}% completado"
+                )
+                st.progress(min(pct_vol / 100, 1.0))
+                if pct_vol < 100:
+                    st.caption(f"Faltan: {progreso['volumen']['faltante']:,.0f} kg")
+                else:
+                    st.caption("✅ ¡Meta cumplida!")
+            
+            # Alertas de meta
+            alertas_meta = []
+            if pct_util < 50:
+                alertas_meta.append("⚠️ Estás al 50% o menos de tu meta de utilidad")
+            if pct_ops < 70:
+                alertas_meta.append("⚠️ Necesitas más operaciones para cumplir la meta")
+            
+            if alertas_meta:
+                st.divider()
+                for alerta in alertas_meta:
+                    st.warning(alerta)
+            
+            # Notas de la meta
+            if meta_mes.get('notas'):
+                st.info(f"📝 Nota: {meta_mes['notas']}")
+        
+        else:
+            st.info("ℹ️ No hay meta definida para este mes. Define una abajo.")
+        
+        # Formulario para editar/crear meta
+        with st.expander("✏️ Editar Meta del Mes"):
+            with st.form("form_meta"):
+                st.markdown(f"**Configurar meta para {['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'][mes_actual-1]} {año_actual}**")
+                
+                col_f1, col_f2, col_f3 = st.columns(3)
+                
+                with col_f1:
+                    meta_util = st.number_input(
+                        "Meta Utilidad ($)",
+                        value=float(meta_mes['utilidad']) if meta_mes else 10000000.0,
+                        step=100000.0,
+                        format="%.0f"
+                    )
+                
+                with col_f2:
+                    meta_ops = st.number_input(
+                        "Meta Operaciones",
+                        value=int(meta_mes['operaciones']) if meta_mes else 30,
+                        step=1
+                    )
+                
+                with col_f3:
+                    meta_vol = st.number_input(
+                        "Meta Volumen (kg)",
+                        value=float(meta_mes['volumen']) if meta_mes else 25000.0,
+                        step=1000.0,
+                        format="%.0f"
+                    )
+                
+                notas_meta = st.text_area(
+                    "Notas (opcional)",
+                    value=meta_mes.get('notas', '') if meta_mes else '',
+                    placeholder="Ej: Meta agresiva por temporada alta"
+                )
+                
+                if st.form_submit_button("💾 Guardar Meta"):
+                    if guardar_meta(año_actual, mes_actual, meta_util, meta_ops, meta_vol, notas_meta):
+                        st.success("✅ Meta guardada exitosamente")
+                        st.rerun()
+                    else:
+                        st.error("❌ Error al guardar meta")
+
 
 # ==================== TAB: ANALÍTICA ====================
 
