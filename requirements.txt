@@ -5,4 +5,3 @@ supabase
 python-dotenv
 openpyxl
 xlsxwriter
-Add xlsxwriter for Excel export
