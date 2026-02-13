@@ -1480,17 +1480,17 @@ with tab_nueva_op:
             "Fruta",
             obtener_opciones(df_ventas, 'Producto', ["Plátano", "Guayabo"])
         )
-        nuevo_prod = col2.text_input("¿Otra?", placeholder="Opcional")
+        nuevo_prod = col2.text_input("¿Otra fruta?", placeholder="Opcional", key="nuevo_producto")
         proveedor = col3.selectbox(
             "Proveedor",
             obtener_opciones(df_ventas, 'Proveedor', ["Omar", "Rancho"])
         )
-        nuevo_prov = col3.text_input("¿Otro?", placeholder="Opcional")
+        nuevo_prov = col3.text_input("¿Otro proveedor?", placeholder="Opcional", key="nuevo_proveedor")
         cliente = col4.selectbox(
             "Cliente",
             obtener_opciones(df_ventas, 'Cliente', ["Calima", "Fogón del Mar"])
         )
-        nuevo_cli = col4.text_input("¿Otro?", placeholder="Opcional")
+        nuevo_cli = col4.text_input("¿Otro cliente?", placeholder="Opcional", key="nuevo_cliente")
         
         col_compra, col_venta = st.columns(2)
         
