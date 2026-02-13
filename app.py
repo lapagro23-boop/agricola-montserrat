@@ -642,6 +642,94 @@ with st.sidebar.form("config_caja"):
             logger.error(f"Error al ajustar caja: {e}")
             st.error(f"❌ Error: {str(e)}")
 
+# ==================== CARGA TEMPORAL DE DATOS 2025 ====================
+st.sidebar.divider()
+st.sidebar.subheader("🔄 Cargar Datos 2025")
+
+with st.sidebar.expander("⚠️ Solo una vez"):
+    uploaded_csv = st.file_uploader("Sube AM_2025.csv", type=['csv'], key="csv_2025")
+    
+    if uploaded_csv and st.button("🚀 Cargar a Supabase"):
+        with st.spinner("Procesando..."):
+            try:
+                df_csv = pd.read_csv(uploaded_csv)
+                
+                def limpiar_moneda(valor):
+                    if pd.isna(valor) or valor == '':
+                        return 0.0
+                    if isinstance(valor, str):
+                        valor = valor.replace('$', '').replace(',', '').replace(' ', '')
+                        try:
+                            return float(valor)
+                        except:
+                            return 0.0
+                    return float(valor)
+                
+                def normalizar_cliente(cliente):
+                    if pd.isna(cliente) or cliente == '':
+                        return None
+                    if 'Fogón' in str(cliente) or 'Fogoón' in str(cliente):
+                        return 'Fogón del Mar'
+                    return str(cliente).strip()
+                
+                df_csv['Fecha'] = pd.to_datetime(df_csv['Fecha'], format='%d/%m/%Y', errors='coerce')
+                
+                columnas_moneda = [
+                    'Precio de Compra', 'Viáticos', 'Flete', 
+                    'Otros Gastos', 'Precio de Venta', 
+                    'RETENCIONES', 'Descuentos', 'Utilidad neta'
+                ]
+                
+                for col in columnas_moneda:
+                    if col in df_csv.columns:
+                        df_csv[col] = df_csv[col].apply(limpiar_moneda)
+                
+                if 'Cantidad (Kg)' in df_csv.columns:
+                    df_csv['Cantidad (Kg)'] = pd.to_numeric(df_csv['Cantidad (Kg)'], errors='coerce').fillna(0)
+                if 'Cantidad (kg)' in df_csv.columns:
+                    df_csv['Cantidad (kg)'] = pd.to_numeric(df_csv['Cantidad (kg)'], errors='coerce').fillna(0)
+                
+                if 'Cliente' in df_csv.columns:
+                    df_csv['Cliente'] = df_csv['Cliente'].apply(normalizar_cliente)
+                
+                df_valido = df_csv[df_csv['Fecha'].notna()].copy()
+                
+                registros = []
+                for idx, row in df_valido.iterrows():
+                    try:
+                        registro = {
+                            'fecha': row['Fecha'].strftime('%Y-%m-%d'),
+                            'proveedor': str(row.get('Proveedor', '')).strip() if pd.notna(row.get('Proveedor')) else None,
+                            'cliente': normalizar_cliente(row.get('Cliente')),
+                            'producto': str(row.get('Producto', '')).strip() if pd.notna(row.get('Producto')) else None,
+                            'kg_compra': float(row.get('Cantidad (Kg)', 0)),
+                            'precio_compra': float(row.get('Precio de Compra', 0)),
+                            'viaticos': float(row.get('Viáticos', 0)),
+                            'fletes': float(row.get('Flete', 0)),
+                            'otros_gastos': float(row.get('Otros Gastos', 0)),
+                            'kg_venta': float(row.get('Cantidad (kg)', 0)),
+                            'precio_venta': float(row.get('Precio de Venta', 0)),
+                            'retenciones': float(row.get('RETENCIONES', 0)),
+                            'descuentos': float(row.get('Descuentos', 0)),
+                            'utilidad_neta': float(row.get('Utilidad neta', 0))
+                        }
+                        registros.append(registro)
+                    except:
+                        continue
+                
+                batch_size = 100
+                total = 0
+                for i in range(0, len(registros), batch_size):
+                    batch = registros[i:i+batch_size]
+                    supabase.table('ventas_2025').insert(batch).execute()
+                    total += len(batch)
+                
+                st.sidebar.success(f"✅ {total} registros cargados!")
+                st.sidebar.info("Ahora elimina esta sección del código")
+                
+            except Exception as e:
+                st.sidebar.error(f"❌ Error: {e}")
+
 # ==================== FILTROS DE DATOS ====================
 
 df_ventas_filtradas = df_ventas[
