@@ -521,6 +521,123 @@ def generar_reporte_semanal(df_ventas, df_gastos, fecha_inicio, fecha_fin):
     
     return reporte
 
+
+
+# ==================== FUNCIONES DE ANÁLISIS DE PRECIOS HISTÓRICOS ====================
+
+def obtener_semana_del_mes(fecha):
+    """Obtiene el número de semana dentro del mes (1-5)."""
+    dia = fecha.day
+    return (dia - 1) // 7 + 1
+
+def analizar_precios_historicos(df_2025, df_2026, producto="Plátano"):
+    """Analiza precios históricos comparando 2025 vs 2026."""
+    import numpy as np
+    
+    analisis = {
+        'por_semana': {}, 'promedio_2025': 0, 'promedio_2026': 0,
+        'diferencia_promedio': 0, 'alertas': []
+    }
+    
+    df_2025_prod = df_2025[df_2025['producto'] == producto].copy() if not df_2025.empty else pd.DataFrame()
+    df_2026_prod = df_2026[df_2026['Producto'] == producto].copy() if not df_2026.empty else pd.DataFrame()
+    
+    if df_2025_prod.empty and df_2026_prod.empty:
+        return analisis
+    
+    if not df_2025_prod.empty:
+        df_2025_prod['Semana'] = df_2025_prod['fecha'].apply(obtener_semana_del_mes)
+        df_2025_prod['Mes'] = df_2025_prod['fecha'].dt.month
+    
+    if not df_2026_prod.empty:
+        df_2026_prod['Semana'] = df_2026_prod['Fecha'].apply(obtener_semana_del_mes)
+        df_2026_prod['Mes'] = df_2026_prod['Fecha'].dt.month
+    
+    for mes in range(1, 13):
+        for semana in range(1, 6):
+            key = f"M{mes}_S{semana}"
+            precio_2025 = 0
+            if not df_2025_prod.empty:
+                datos_2025 = df_2025_prod[(df_2025_prod['Mes'] == mes) & (df_2025_prod['Semana'] == semana)]
+                if not datos_2025.empty:
+                    precio_2025 = datos_2025['precio_compra'].mean()
+            
+            precio_2026 = 0
+            if not df_2026_prod.empty:
+                datos_2026 = df_2026_prod[(df_2026_prod['Mes'] == mes) & (df_2026_prod['Semana'] == semana)]
+                if not datos_2026.empty:
+                    precio_2026 = datos_2026['Precio_Compra'].mean()
+            
+            if precio_2025 > 0 or precio_2026 > 0:
+                analisis['por_semana'][key] = {
+                    'mes': mes, 'semana': semana,
+                    'precio_2025': precio_2025, 'precio_2026': precio_2026,
+                    'diferencia': precio_2026 - precio_2025,
+                    'porcentaje': ((precio_2026 - precio_2025) / precio_2025 * 100) if precio_2025 > 0 else 0
+                }
+    
+    if not df_2025_prod.empty:
+        analisis['promedio_2025'] = df_2025_prod['precio_compra'].mean()
+    if not df_2026_prod.empty:
+        analisis['promedio_2026'] = df_2026_prod['Precio_Compra'].mean()
+    
+    analisis['diferencia_promedio'] = analisis['promedio_2026'] - analisis['promedio_2025']
+    
+    if analisis['promedio_2025'] > 0 and analisis['promedio_2026'] > 0:
+        pct_cambio = (analisis['diferencia_promedio'] / analisis['promedio_2025']) * 100
+        if pct_cambio > 30:
+            analisis['alertas'].append({'tipo': 'warning', 'mensaje': f"⚠️ Precio {pct_cambio:.1f}% MÁS ALTO que 2025"})
+        elif pct_cambio < -20:
+            analisis['alertas'].append({'tipo': 'success', 'mensaje': f"✅ Precio {abs(pct_cambio):.1f}% MÁS BAJO - Buen momento para comprar"})
+        elif abs(pct_cambio) < 10:
+            analisis['alertas'].append({'tipo': 'info', 'mensaje': f"ℹ️ Precio estable vs 2025 ({pct_cambio:+.1f}%)"})
+    
+    return analisis
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def cargar_datos_2025():
+    """Carga datos históricos 2025."""
+    df_2025 = pd.DataFrame()
+    try:
+        respuesta = supabase.table("ventas_2025").select("*").order("fecha", desc=True).execute()
+        df_2025 = pd.DataFrame(respuesta.data)
+        if not df_2025.empty:
+            df_2025['fecha'] = pd.to_datetime(df_2025['fecha'])
+            campos_numericos = ['kg_compra', 'precio_compra', 'viaticos', 'fletes', 'otros_gastos',
+                               'kg_venta', 'precio_venta', 'retenciones', 'descuentos', 'utilidad_neta']
+            for campo in campos_numericos:
+                if campo in df_2025.columns:
+                    df_2025[campo] = pd.to_numeric(df_2025[campo], errors='coerce').fillna(0.0)
+    except Exception as e:
+        logger.error(f"Error al cargar datos 2025: {e}")
+    return df_2025
+
+@st.cache_data(ttl=CACHE_TTL_SECONDS)
+def cargar_notas_precios():
+    """Carga notas de precios."""
+    df_notas = pd.DataFrame()
+    try:
+        respuesta = supabase.table("notas_precios").select("*").order("fecha", desc=True).execute()
+        df_notas = pd.DataFrame(respuesta.data)
+        if not df_notas.empty:
+            df_notas['fecha'] = pd.to_datetime(df_notas['fecha'])
+    except Exception as e:
+        logger.error(f"Error al cargar notas: {e}")
+    return df_notas
+
+def guardar_nota_precio(fecha, producto, nota, tipo_evento):
+    """Guarda nota sobre precios."""
+    try:
+        supabase.table("notas_precios").insert({
+            "fecha": str(fecha), "producto": producto,
+            "nota": nota, "tipo_evento": tipo_evento
+        }).execute()
+        cargar_notas_precios.clear()
+        return True
+    except Exception as e:
+        logger.error(f"Error al guardar nota: {e}")
+        return False
+
 # ==================== SEGURIDAD ====================
 
 def verificar_password():
@@ -580,6 +697,8 @@ st.sidebar.divider()
 
 if st.sidebar.button("🔄 Actualizar Datos"):
     cargar_datos.clear()
+    cargar_datos_2025.clear()
+    cargar_notas_precios.clear()
     st.rerun()
 
 st.sidebar.divider()
@@ -591,6 +710,9 @@ fecha_fin = st.sidebar.date_input("Hasta", date(2026, 12, 31))
 
 # Cargar datos
 df_ventas, df_gastos, saldo_inicial = cargar_datos()
+df_2025 = cargar_datos_2025()
+df_notas = cargar_notas_precios()
+
 
 # ==================== CÁLCULOS FINANCIEROS ====================
 
@@ -724,12 +846,13 @@ tabs = st.tabs([
     "📊 Dashboard",
     "📈 Analítica",
     "📋 Reportes",
+    "📈 Precios Históricos",
     "💸 Movimientos",
     "🧮 Nueva Op.",
     "🚦 Cartera"
 ])
 
-(tab_dashboard, tab_analitica, tab_reportes, 
+(tab_dashboard, tab_analitica, tab_reportes, tab_precios,
  tab_movimientos, tab_nueva_op, tab_cartera) = tabs
 
 # ==================== TAB: DASHBOARD ====================
@@ -1748,6 +1871,225 @@ with tab_cartera:
                 except Exception as e:
                     logger.error(f"Error: {e}")
                     st.error(f"❌ Error: {str(e)}")
+
+
+# ==================== TAB: PRECIOS HISTÓRICOS ====================
+
+with tab_precios:
+    st.subheader("📈 Análisis de Precios Históricos")
+    
+    st.markdown("""
+    Compara precios históricos entre 2025 y 2026 para anticiparte a las fluctuaciones 
+    del mercado y tomar mejores decisiones de compra.
+    """)
+    
+    st.divider()
+    
+    # Selector de producto
+    productos_disponibles = []
+    if not df_ventas.empty:
+        productos_disponibles = df_ventas['Producto'].unique().tolist()
+    if not df_2025.empty:
+        productos_2025 = df_2025['producto'].unique().tolist()
+        productos_disponibles = list(set(productos_disponibles + productos_2025))
+    
+    if not productos_disponibles:
+        st.warning("⚠️ No hay datos de productos disponibles")
+    else:
+        col_sel1, col_sel2 = st.columns([1, 3])
+        
+        with col_sel1:
+            producto_seleccionado = st.selectbox(
+                "Producto",
+                sorted(productos_disponibles),
+                index=0 if "Plátano" in productos_disponibles else 0
+            )
+        
+        with col_sel2:
+            st.info(f"📊 Analizando: **{producto_seleccionado}**")
+        
+        # Análisis
+        analisis = analizar_precios_historicos(df_2025, df_ventas_filtradas, producto_seleccionado)
+        
+        # Métricas
+        st.markdown("### 💰 Resumen de Precios")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Promedio 2025",
+                f"${analisis['promedio_2025']:,.0f}/kg" if analisis['promedio_2025'] > 0 else "Sin datos"
+            )
+        
+        with col2:
+            st.metric(
+                "Promedio 2026",
+                f"${analisis['promedio_2026']:,.0f}/kg" if analisis['promedio_2026'] > 0 else "Sin datos",
+                delta=f"${analisis['diferencia_promedio']:,.0f}" if analisis['diferencia_promedio'] != 0 else None
+            )
+        
+        with col3:
+            if analisis['promedio_2025'] > 0 and analisis['promedio_2026'] > 0:
+                pct_cambio = (analisis['diferencia_promedio'] / analisis['promedio_2025']) * 100
+                st.metric(
+                    "Variación",
+                    f"{pct_cambio:+.1f}%",
+                    delta="Aumento" if pct_cambio > 0 else "Reducción",
+                    delta_color="inverse" if pct_cambio > 0 else "normal"
+                )
+        
+        # Alertas
+        if analisis['alertas']:
+            st.divider()
+            for alerta in analisis['alertas']:
+                if alerta['tipo'] == 'warning':
+                    st.warning(alerta['mensaje'])
+                elif alerta['tipo'] == 'success':
+                    st.success(alerta['mensaje'])
+                else:
+                    st.info(alerta['mensaje'])
+        
+        st.divider()
+        
+        # Gráfico
+        st.markdown("### 📊 Evolución Semanal")
+        
+        if analisis['por_semana']:
+            datos_grafico = []
+            meses_nombres = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 
+                            'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+            
+            for key, datos in sorted(analisis['por_semana'].items()):
+                mes_nombre = meses_nombres[datos['mes'] - 1]
+                semana = datos['semana']
+                
+                if datos['precio_2025'] > 0:
+                    datos_grafico.append({
+                        'Periodo': f"{mes_nombre} S{semana}",
+                        'Precio': datos['precio_2025'],
+                        'Año': '2025'
+                    })
+                
+                if datos['precio_2026'] > 0:
+                    datos_grafico.append({
+                        'Periodo': f"{mes_nombre} S{semana}",
+                        'Precio': datos['precio_2026'],
+                        'Año': '2026'
+                    })
+            
+            if datos_grafico:
+                df_grafico = pd.DataFrame(datos_grafico)
+                
+                fig = go.Figure()
+                
+                df_2025_graf = df_grafico[df_grafico['Año'] == '2025']
+                if not df_2025_graf.empty:
+                    fig.add_trace(go.Scatter(
+                        x=df_2025_graf['Periodo'],
+                        y=df_2025_graf['Precio'],
+                        name='2025',
+                        mode='lines+markers',
+                        line=dict(color='#42a5f5', width=3),
+                        marker=dict(size=8)
+                    ))
+                
+                df_2026_graf = df_grafico[df_grafico['Año'] == '2026']
+                if not df_2026_graf.empty:
+                    fig.add_trace(go.Scatter(
+                        x=df_2026_graf['Periodo'],
+                        y=df_2026_graf['Precio'],
+                        name='2026',
+                        mode='lines+markers',
+                        line=dict(color='#66bb6a', width=3),
+                        marker=dict(size=8)
+                    ))
+                
+                # Agregar notas si existen
+                if not df_notas.empty:
+                    notas_producto = df_notas[df_notas['producto'] == producto_seleccionado]
+                    for idx, nota in notas_producto.iterrows():
+                        mes = nota['fecha'].month
+                        semana = obtener_semana_del_mes(nota['fecha'])
+                        periodo_nota = f"{meses_nombres[mes-1]} S{semana}"
+                        
+                        precio_periodo = df_2026_graf[df_2026_graf['Periodo'] == periodo_nota]
+                        if not precio_periodo.empty:
+                            fig.add_annotation(
+                                x=periodo_nota,
+                                y=precio_periodo['Precio'].iloc[0],
+                                text=f"📝 {nota['nota'][:20]}...",
+                                showarrow=True,
+                                arrowhead=2,
+                                bgcolor="#fff3cd",
+                                bordercolor="#ff6b6b"
+                            )
+                
+                fig.update_layout(
+                    title=f"Precios: {producto_seleccionado}",
+                    xaxis_title="Periodo",
+                    yaxis_title="Precio ($/kg)",
+                    height=500
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+        
+        st.divider()
+        
+        # Tabla comparativa
+        st.markdown("### 📋 Tabla Comparativa")
+        
+        if analisis['por_semana']:
+            datos_tabla = []
+            meses_nombres = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+                            'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']
+            
+            for key, datos in sorted(analisis['por_semana'].items()):
+                if datos['precio_2025'] > 0 or datos['precio_2026'] > 0:
+                    datos_tabla.append({
+                        'Mes': meses_nombres[datos['mes'] - 1],
+                        'Semana': f"S{datos['semana']}",
+                        '2025': f"${datos['precio_2025']:,.0f}" if datos['precio_2025'] > 0 else "-",
+                        '2026': f"${datos['precio_2026']:,.0f}" if datos['precio_2026'] > 0 else "-",
+                        'Dif': f"${datos['diferencia']:+,.0f}" if datos['precio_2025'] > 0 and datos['precio_2026'] > 0 else "-",
+                        '%': f"{datos['porcentaje']:+.1f}%" if datos['porcentaje'] != 0 else "-"
+                    })
+            
+            if datos_tabla:
+                st.dataframe(pd.DataFrame(datos_tabla), use_container_width=True, hide_index=True)
+        
+        st.divider()
+        
+        # Sistema de notas
+        st.markdown("### 📝 Agregar Nota")
+        
+        with st.form("nota_precio"):
+            col_n1, col_n2 = st.columns([1, 2])
+            
+            with col_n1:
+                fecha_nota = st.date_input("Fecha", date.today())
+                tipo_evento = st.selectbox("Tipo", ["precio_alto", "precio_bajo", "normal", "atipico"])
+            
+            with col_n2:
+                nota_texto = st.text_area("Comentario", placeholder="Ej: Helada causó escasez...")
+            
+            if st.form_submit_button("💾 Guardar"):
+                if nota_texto:
+                    if guardar_nota_precio(fecha_nota, producto_seleccionado, nota_texto, tipo_evento):
+                        st.success("✅ Nota guardada")
+                        st.rerun()
+                else:
+                    st.error("❌ Agrega un comentario")
+        
+        # Mostrar notas
+        if not df_notas.empty:
+            notas_producto = df_notas[df_notas['producto'] == producto_seleccionado].head(5)
+            if not notas_producto.empty:
+                st.markdown("#### 📚 Notas Recientes")
+                for idx, nota in notas_producto.iterrows():
+                    st.markdown(f"**{nota['fecha'].strftime('%d/%m/%Y')}** - {nota['nota']}")
+                    st.caption(f"_{nota['tipo_evento']}_")
+
 
 # ==================== FOOTER ====================
 
