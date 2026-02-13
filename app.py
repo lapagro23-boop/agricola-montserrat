@@ -342,87 +342,6 @@ def color_deuda(row):
             color = 'background-color: #e8f5e9; color: #1b5e20; font-weight: bold;'
         elif row['Estado_Pago'] == 'Pendiente':
             dias_credito = int(row['Dias_Credito']) if pd.notnull(row['Dias_Credito']) else 0
-            fecha_vencimiento = row['Fecha'] + timedelta(days=dias_credito)
-            dias_restantes = (fecha_vencimiento.date() - date.today()).days
-            
-            if dias_restantes < 0:
-                color = 'background-color: #ffebee; color: #b71c1c; font-weight: bold;'
-            elif dias_restantes <= 3:
-                color = 'background-color: #fff8e1; color: #f57f17; font-weight: bold;'
-    except Exception as e:
-        logger.error(f"Error al aplicar color: {e}")
-    
-    return [color] * len(row)
-
-def obtener_opciones(df, columna, valores_default):
-    """Obtiene lista de opciones únicas."""
-    existentes = df[columna].unique().tolist() if not df.empty and columna in df.columns else []
-    todas = list(set(valores_default + [x for x in existentes if x]))
-    return sorted(todas)
-
-# ==================== FUNCIONES DE BASE DE DATOS ====================
-
-def subir_archivo(archivo, nombre_base):
-    """Sube archivo a Supabase Storage."""
-    if not archivo:
-        return None
-    
-    es_valido, mensaje_error = validar_archivo(archivo)
-    if not es_valido:
-        st.error(f"❌ {mensaje_error}")
-        return None
-    
-    try:
-        ext = archivo.name.split('.')[-1].lower()
-        nombre_limpio = limpiar_nombre_archivo(nombre_base)
-        timestamp = datetime.now().strftime('%m%d_%H%M')
-        nombre_archivo = f"{nombre_limpio}_{timestamp}.{ext}"
-        
-        supabase.storage.from_(BUCKET_FACTURAS).upload(
-            nombre_archivo,
-            archivo.getvalue(),
-            {"content-type": archivo.type, "upsert": "true"}
-        )
-        
-        url_publica = supabase.storage.from_(BUCKET_FACTURAS).get_public_url(nombre_archivo)
-        logger.info(f"Archivo subido: {nombre_archivo}")
-        return url_publica
-        
-    except Exception as e:
-        logger.error(f"Error al subir archivo: {e}")
-        st.error(f"❌ Error: {str(e)}")
-        return None
-
-@st.cache_data(ttl=CACHE_TTL_SECONDS)
-def cargar_datos():
-    """Carga datos desde Supabase con caché optimizado."""
-    df_ventas = pd.DataFrame()
-    try:
-        respuesta = supabase.table("ventas_2026").select("*").order("fecha", desc=True).execute()
-        df_ventas = pd.DataFrame(respuesta.data)
-        
-        if not df_ventas.empty:
-            columnas_mapa = {
-                'id': 'ID', 'fecha': 'Fecha', 'producto': 'Producto', 
-                'proveedor': 'Proveedor', 'cliente': 'Cliente',
-                'fec_doc_url': 'FEC_Doc', 'fev_doc_url': 'FEV_Doc',
-                'kg_compra': 'Kg_Compra', 'precio_compra': 'Precio_Compra',
-                'viaticos': 'Viaticos', 'fletes': 'Fletes', 'otros_gastos': 'Otros_Gastos',
-                'kg_venta': 'Kg_Venta', 'precio_venta': 'Precio_Venta',
-                'retenciones': 'Retenciones', 'descuentos': 'Descuentos',
-                'utilidad': 'Utilidad', 'estado_pago': 'Estado_Pago',
-                'dias_credito': 'Dias_Credito', 'precio_plaza': 'Precio_Plaza'
-            }
-            df_ventas = df_ventas.rename(
-                columns={k: v for k, v in columnas_mapa.items() if k in df_ventas.columns}
-            )
-            
-            df_ventas['Fecha'] = pd.to_datetime(df_ventas['Fecha'])
-            
-            campos_numericos = [
-                'Kg_Compra', 'Precio_Compra', 'Viaticos', 'Fletes', 'Otros_Gastos',
-                'Kg_Venta', 'Precio_Venta', 'Retenciones', 'Descuentos', 
-                'Utilidad', 'Precio_Plaza'
             ]
             for campo in campos_numericos:
                 if campo in df_ventas.columns:
@@ -1839,3 +1758,4 @@ with tab_cartera:
 
 st.divider()
 st.caption("Agrícola Montserrat - Sistema de Gestión v3.0 | FASE 1 Completa | Febrero 2026")
+
